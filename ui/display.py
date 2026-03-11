@@ -137,10 +137,10 @@ class Display:
         bw, bh = (PANEL_W - 20) // 2 - 5, 32
 
         self._buttons = [
-            {"label": "⏸ Pause",  "rect": pygame.Rect(bx, by, bw, bh),       "action": "pause"},
-            {"label": "▶ Play",   "rect": pygame.Rect(bx + bw + 10, by, bw, bh), "action": "play"},
-            {"label": "Speed ▲",  "rect": pygame.Rect(bx, by + bh + 8, bw, bh),  "action": "speed_up"},
-            {"label": "Speed ▼",  "rect": pygame.Rect(bx + bw + 10, by + bh + 8, bw, bh), "action": "speed_down"},
+            {"label": "|| PAUSE", "rect": pygame.Rect(bx, by, bw, bh),            "action": "pause"},
+            {"label": "> PLAY",   "rect": pygame.Rect(bx + bw + 10, by, bw, bh),  "action": "play"},
+            {"label": "SPEED +",  "rect": pygame.Rect(bx, by + bh + 8, bw, bh),   "action": "speed_up"},
+            {"label": "SPEED -",  "rect": pygame.Rect(bx + bw + 10, by + bh + 8, bw, bh), "action": "speed_down"},
         ]
 
     # ------------------------------------------------------------------
@@ -241,24 +241,60 @@ class Display:
                 pygame.draw.circle(self.screen, TEAM_B, px, r + 9, 3)
 
     def _draw_routes(self, state: GameState) -> None:
-        """Draw a line from each team's current position to their destination."""
+        """
+        Draw each team's route as a polyline through all remaining intermediate stops.
+        Segments shared by both teams are offset perpendicularly so both are visible.
+        A filled circle marks the team's current position.
+        """
         surf = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
+
+        OFFSET = 4   # pixels perpendicular to each segment
+        offsets = {"A": +OFFSET, "B": -OFFSET}
+
         for team_id, colour in (("A", ROUTE_A), ("B", ROUTE_B)):
             team = state.teams[team_id]
             if not team.is_in_transit():
                 continue
-            src = self._station_px.get(team.current_station)
-            dst = self._station_px.get(team.destination_station) if team.destination_station else None
-            if src and dst:
-                pygame.draw.line(surf, colour, src, dst, 3)
-                # Arrow head at destination
-                dx, dy = dst[0] - src[0], dst[1] - src[1]
+
+            # Build the ordered stop list: current position → remaining stops
+            stops = [team.current_station] + list(team.remaining_stops)
+            points = [self._station_px.get(s) for s in stops]
+            points = [p for p in points if p is not None]
+            if len(points) < 2:
+                continue
+
+            side = offsets[team_id]
+
+            # Draw each segment with perpendicular offset
+            for i in range(len(points) - 1):
+                p0, p1 = points[i], points[i + 1]
+                dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+                length = math.hypot(dx, dy) or 1
+                ox = -dy / length * side
+                oy =  dx / length * side
+
+                s = (int(p0[0] + ox), int(p0[1] + oy))
+                d = (int(p1[0] + ox), int(p1[1] + oy))
+                pygame.draw.line(surf, colour, s, d, 2)
+
+            # Arrow head at final destination
+            if len(points) >= 2:
+                p0, p1 = points[-2], points[-1]
+                dx, dy = p1[0] - p0[0], p1[1] - p0[1]
                 length = math.hypot(dx, dy) or 1
                 ux, uy = dx / length, dy / length
-                tip = dst
-                left  = (int(tip[0] - ux * 10 + uy * 5), int(tip[1] - uy * 10 - ux * 5))
-                right = (int(tip[0] - ux * 10 - uy * 5), int(tip[1] - uy * 10 + ux * 5))
+                ox = -dy / length * side
+                oy =  dx / length * side
+                tip = (int(p1[0] + ox), int(p1[1] + oy))
+                left  = (int(tip[0] - ux * 9 + oy * 0.5), int(tip[1] - uy * 9 - ox * 0.5))
+                right = (int(tip[0] - ux * 9 - oy * 0.5), int(tip[1] - uy * 9 + ox * 0.5))
                 pygame.draw.polygon(surf, colour, [tip, left, right])
+
+            # Filled circle at current position
+            origin = self._station_px.get(team.current_station)
+            if origin:
+                pygame.draw.circle(surf, colour, origin, 6)
+
         self.screen.blit(surf, (0, 0))
 
     # ------------------------------------------------------------------
@@ -289,10 +325,13 @@ class Display:
         text(f"  Coins:    {team_a.coins}")
         text(f"  Stations: {ctrl_a}")
         station_a = state.stations.get(team_a.current_station)
-        text(f"  At:       {station_a.name[:22] if station_a else '?'!r}")
+        at_name_a = station_a.name[:22] if station_a else "?"
+        status_a = "transit" if team_a.is_in_transit() else "idle"
+        text(f"  [{status_a}] {at_name_a}")
         if team_a.is_in_transit():
             dst = state.stations.get(team_a.destination_station or "")
-            text(f"  → {dst.name[:20] if dst else '?'!r}")
+            dst_name = dst.name[:24] if dst else "?"
+            text(f"  → {dst_name}", colour=TEAM_A)
 
         y += 4
 
@@ -303,10 +342,13 @@ class Display:
         text(f"  Coins:    {team_b.coins}")
         text(f"  Stations: {ctrl_b}")
         station_b = state.stations.get(team_b.current_station)
-        text(f"  At:       {station_b.name[:22] if station_b else '?'!r}")
+        at_name_b = station_b.name[:22] if station_b else "?"
+        status_b = "transit" if team_b.is_in_transit() else "idle"
+        text(f"  [{status_b}] {at_name_b}")
         if team_b.is_in_transit():
             dst = state.stations.get(team_b.destination_station or "")
-            text(f"  → {dst.name[:20] if dst else '?'!r}")
+            dst_name = dst.name[:24] if dst else "?"
+            text(f"  → {dst_name}", colour=TEAM_B)
 
         y += 6
 
@@ -327,7 +369,7 @@ class Display:
         speed = self.speed_options[self.speed_idx]
         pause_str = "PAUSED" if state.is_paused else f"{speed}x"
         text(f"── Simulation: {pause_str} ──", self.font_lg)
-        text("SPACE=pause  ↑↓=speed", self.font_sm)
+        text("SPACE=pause  UP/DN=speed", self.font_sm)
 
         # Buttons
         for btn in self._buttons:

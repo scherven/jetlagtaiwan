@@ -81,13 +81,12 @@ def place_chips_at_stop(
     opp_chips = getattr(station, opp_attr)
 
     if team.coins <= 0:
-        # Zero-coins travel rule
+        # Zero-coins travel rule: pay coin penalty only — cannot contest.
         if opp_chips > our_chips:
-            # Opponent controls: pay 3 chips penalty to opponent (as coins)
-            team.coins -= enemy_station_penalty
-            chips_to_place = opp_chips - our_chips + 1
+            team.coins -= enemy_station_penalty   # bleed 3 coins, place nothing
+            chips_to_place = 0
         else:
-            team.coins -= own_station_penalty
+            team.coins -= own_station_penalty     # bleed 1 coin, place 1 chip minimum
             chips_to_place = 1
     else:
         if opp_chips > our_chips:
@@ -96,7 +95,8 @@ def place_chips_at_stop(
             chips_to_place = 1
         team.coins -= chips_to_place
 
-    setattr(station, chip_attr, our_chips + chips_to_place)
+    if chips_to_place > 0:
+        setattr(station, chip_attr, our_chips + chips_to_place)
     logger.debug(
         "Team %s placed %d chips at %s (balance now %d)",
         team.id, chips_to_place, station.name, team.coins,

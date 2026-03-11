@@ -82,6 +82,8 @@ class Simulation:
         self.state: GameState = self._new_game_state()
         self.log: List[str] = []          # human-readable event log
         self.done: bool = False
+        # When True, step() skips agent queries (AEC env drives them externally)
+        self.skip_agent_queries: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -115,9 +117,10 @@ class Simulation:
         for team_id in ("A", "B"):
             events += self._process_challenge_completion(team_id, current_wall)
 
-        # 3. Query idle agents for decisions
-        for team_id in ("A", "B"):
-            events += self._query_agent_if_idle(team_id)
+        # 3. Query idle agents for decisions (skipped when AEC env drives externally)
+        if not self.skip_agent_queries:
+            for team_id in ("A", "B"):
+                events += self._query_agent_if_idle(team_id)
 
         # 4. Advance clock
         self.state.sim_minute += 1
