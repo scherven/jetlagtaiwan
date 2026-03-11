@@ -1,0 +1,54 @@
+network:
+  # Each entry is a directory containing a GTFS feed (stops.txt, trips.txt, stop_times.txt, routes.txt).
+  # Add multiple entries to merge feeds into one unified graph.
+  # To switch networks, change these paths and update starting_station below.
+  feeds:
+    - "data/nyc_subway_gtfs"
+  # "parent" = use parent_station field to collapse platforms into stations (good for NYC subway).
+  # "name"   = merge stops with identical names across feeds (good for multi-operator networks).
+  merge_strategy: "parent"
+
+game:
+  starting_coins: 50
+  starting_station: "Times Sq-42 St"
+  num_days: 5
+  day_start: "07:30"
+  day_end: "17:30"
+
+travel:
+  min_chips_per_stop: 1
+  own_station_penalty: 1        # chips paid when transiting own station at zero balance
+  enemy_station_penalty: 3      # chips paid to opponent when transiting their station at zero balance
+
+challenges:
+  initial_count: 3
+  spawn_threshold: 10           # if board has fewer than this, spawn 2 on completion; else spawn 1
+  chip_gain_base: 50
+  steal_fraction: 0.20          # 20% of opponent balance
+  steal_probability: 0.25       # probability a new challenge is a steal (vs chip_gain)
+  daily_multiplier: 1.10        # challenges become 10% more valuable each day
+  completion_time_minutes: 30
+
+simulation:
+  speed_options: [1, 5, 20, 100]   # available speed multipliers in UI
+  clock_increment_minutes: 1
+
+agents:
+  max_departures_k: 10             # K in observation space
+  heuristic_reachability_window: 60  # minutes ahead to scan for departures
+
+training:
+  algorithm: "PPO"
+  total_timesteps: 5_000_000
+  learning_rate: 0.0003
+  n_steps: 2048                    # PPO rollout length
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  clip_range: 0.2
+  opponent_swap_interval: 50       # episodes between opponent policy swaps
+  eval_interval: 200               # episodes between heuristic evaluations
+  eval_episodes: 100               # rolling window size for win rate
+  win_rate_target: 0.70            # stop training when this is reached
+  log_file: "training_log.csv"
+  snapshot_dir: "checkpoints/"
