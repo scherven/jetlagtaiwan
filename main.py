@@ -1,14 +1,16 @@
 """
 Entry point for the Rail Strategy Game — Phase 1.
 
-Runs two heuristic agents against each other with a Pygame observer UI.
-
 Usage:
-    python main.py [--headless] [--speed MULTIPLIER]
+    python main.py                                 # heuristic vs heuristic
+    python main.py --model-a checkpoints/best_model.zip          # RL agent as A
+    python main.py --model-a X.zip --model-b Y.zip               # RL vs RL
+    python main.py --headless                      # no display (fast)
+    python main.py --speed 100                     # faster UI
 
-Options:
-    --headless      Run without display (useful for testing/profiling)
-    --speed N       Starting simulation speed multiplier (default: 20)
+Agent flags:
+    --model-a PATH   Load a trained SB3 model as Team A (default: heuristic)
+    --model-b PATH   Load a trained SB3 model as Team B (default: heuristic)
 """
 
 from __future__ import annotations
@@ -25,10 +27,33 @@ logging.basicConfig(
     format="%(levelname)s %(name)s: %(message)s",
 )
 
+def _load_rl_agent(model_path: str, team_label: str):
+    """Load a trained SB3 PPO model and return an agent callback."""
+    try:
+        from stable_baselines3 import PPO
+        import numpy as np
+        model = PPO.load(model_path)
+        print(f"  Loaded RL model for Team {team_label}: {model_path}")
+        def agent_fn(state, rail_network, team_id, departures):
+            from agents.eval import encode_observation
+            # obs needs a dummy starting_station_id — get it from state
+            obs = encode_observation(state, rail_network, team_id, departures,
+                                     _STARTING_ID, k=10, starting_coins=50)
+            action, _ = model.predict(obs, deterministic=True)
+            return int(action)
+        return agent_fn
+    except Exception as e:
+        print(f"  WARNING: could not load model for Team {team_label}: {e}")
+        return None
+
+_STARTING_ID = None   # set after network load so the RL closure can reference it
+
 def main():
     parser = argparse.ArgumentParser(description="Rail Strategy Game")
     parser.add_argument("--headless", action="store_true", help="Run without UI")
     parser.add_argument("--speed", type=float, default=20.0, help="Simulation speed multiplier")
+    parser.add_argument("--model-a", type=str, default=None, help="Path to trained SB3 model for Team A")
+    parser.add_argument("--model-b", type=str, default=None, help="Path to trained SB3 model for Team B")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------ #
@@ -60,18 +85,33 @@ def main():
     # ------------------------------------------------------------------ #
     # Build agents
     # ------------------------------------------------------------------ #
+    global _STARTING_ID
+    _STARTING_ID = starting_station_id
+
     from agents.heuristic import HeuristicAgent
 
-    agent_a_obj = HeuristicAgent(config)
-    agent_a_obj.starting_station_id = starting_station_id
-    agent_b_obj = HeuristicAgent(config)
-    agent_b_obj.starting_station_id = starting_station_id
+    heuristic_a = HeuristicAgent(config)
+    heuristic_a.starting_station_id = starting_station_id
+    heuristic_b = HeuristicAgent(config)
+    heuristic_b.starting_station_id = starting_station_id
+
+    rl_a = _load_rl_agent(args.model_a, "A") if args.model_a else None
+    rl_b = _load_rl_agent(args.model_b, "B") if args.model_b else None
 
     def agent_a(state, rail_network, team_id, departures):
-        return agent_a_obj.choose_action(state, rail_network, team_id, departures)
+        if rl_a:
+            return rl_a(state, rail_network, team_id, departures)
+        return heuristic_a.choose_action(state, rail_network, team_id, departures)
 
     def agent_b(state, rail_network, team_id, departures):
-        return agent_b_obj.choose_action(state, rail_network, team_id, departures)
+        if rl_b:
+            return rl_b(state, rail_network, team_id, departures)
+        return heuristic_b.choose_action(state, rail_network, team_id, departures)
+
+    a_label = f"RL ({args.model_a})" if rl_a else "Heuristic"
+    b_label = f"RL ({args.model_b})" if rl_b else "Heuristic"
+    print(f"  Team A: {a_label}")
+    print(f"  Team B: {b_label}")
 
     # ------------------------------------------------------------------ #
     # Build simulation

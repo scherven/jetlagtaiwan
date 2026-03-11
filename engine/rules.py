@@ -216,21 +216,49 @@ def get_valid_departures(
     current_sim_minute: int,
     window_minutes: int,
     day_end_wall: int = DAY_END_MINUTE,
+    k: int = 10,
 ) -> List[Departure]:
     """
-    Return departures from station_id within the next `window_minutes`,
-    filtered to only those that reach at least one more stop before day end.
+    Return up to k departure options from station_id within the next window_minutes.
+
+    Each option is a (train, chosen-destination) pair — teams ride only as far
+    as the chosen destination, not to the train's terminus. This allows agents to
+    make short hops without being forced onto long expensive trips.
+
+    One option is generated per unique reachable destination (earliest departure
+    wins). Options are sorted by arrival time so the nearest destinations come first.
     """
     from engine.clock import sim_minute_to_wall_clock
 
     current_wall = sim_minute_to_wall_clock(current_sim_minute)
     until_wall = current_wall + window_minutes
 
-    departures = rail_network.departures_from(station_id, current_wall, until_wall)
-    valid = []
-    for dep in departures:
-        if dep.arrival_minutes:
-            first_arr = dep.arrival_minutes[0]
-            if first_arr <= day_end_wall:
-                valid.append(dep)
-    return valid
+    raw = rail_network.departures_from(station_id, current_wall, until_wall)
+
+    # Build one truncated departure per unique destination: earliest departure,
+    # covering only the stops up to and including that destination.
+    by_dest: Dict[str, Departure] = {}
+    for dep in raw:
+        for j, (stop, arr) in enumerate(
+            zip(dep.intermediate_stops, dep.arrival_minutes)
+        ):
+            if arr > day_end_wall:
+                break
+            if stop == station_id:
+                continue
+            if stop not in by_dest:
+                by_dest[stop] = Departure(
+                    trip_id=dep.trip_id,
+                    route_id=dep.route_id,
+                    departure_minute=dep.departure_minute,
+                    destination_stop_id=stop,
+                    intermediate_stops=list(dep.intermediate_stops[: j + 1]),
+                    arrival_minutes=[int(a) for a in dep.arrival_minutes[: j + 1]],
+                )
+
+    # Sort by arrival time (nearest first), then by departure time
+    options = sorted(
+        by_dest.values(),
+        key=lambda d: (d.arrival_minutes[-1], d.departure_minute),
+    )
+    return options[:k]

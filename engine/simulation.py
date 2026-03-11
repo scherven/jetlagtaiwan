@@ -307,7 +307,8 @@ class Simulation:
             self.state.sim_minute,
             window,
             day_end_wall=DAY_END_MINUTE,
-        )[:k]
+            k=k,
+        )
 
         action = self.agents[team_id](self.state, self.net, team_id, departures)
 
@@ -449,4 +450,5 @@ class Simulation:
             self.state.sim_minute,
             window,
             day_end_wall=DAY_END_MINUTE,
-        )[:k]
+            k=k,
+        )

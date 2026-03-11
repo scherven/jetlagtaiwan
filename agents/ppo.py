@@ -49,13 +49,12 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
     _check_imports()
 
     import supersuit as ss
+    from pettingzoo.utils.conversions import aec_to_parallel
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import VecMonitor
 
-    from agents.env_wrapper import make_env, RailGameEnv
+    from agents.env_wrapper import RailGameEnv
     from agents.heuristic import HeuristicAgent
-    from engine.rail_network import RailNetwork
-    from engine.simulation import Simulation
     from engine.rules import count_controlled_stations
 
     tcfg = config["training"]
@@ -77,13 +76,13 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
 
     # ------------------------------------------------------------------ #
     # Build vectorised self-play environment
+    # supersuit requires a ParallelEnv, so convert from AEC first.
+    # Both agents share one policy; SB3 collects rollouts from both.
     # ------------------------------------------------------------------ #
     def make_raw():
-        return RailGameEnv(config, rail_network)
+        aec = RailGameEnv(config, rail_network)
+        return aec_to_parallel(aec)
 
-    # supersuit wraps the AEC env so SB3 sees it as a standard VecEnv.
-    # Both agents' observations are collected in the same rollout buffer,
-    # so the single policy learns from both perspectives simultaneously.
     env = make_raw()
     env = ss.pettingzoo_env_to_vec_env_v1(env)
     env = ss.concat_vec_envs_v1(env, 1, num_cpus=1, base_class="stable_baselines3")

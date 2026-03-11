@@ -46,7 +46,7 @@ class RailGameEnv(AECEnv):
     metadata = {
         "render_modes": [],
         "name": "rail_game_v0",
-        "is_parallelizable": False,
+        "is_parallelizable": True,
     }
 
     def __init__(self, config: dict, rail_network: RailNetwork):
@@ -54,6 +54,7 @@ class RailGameEnv(AECEnv):
         self.config = config
         self.net = rail_network
         self.possible_agents = ["A", "B"]
+        self.render_mode = None
 
         N = len(rail_network.stations)
         K = config["agents"]["max_departures_k"]

@@ -42,11 +42,11 @@ ROUTE_B     = (*TEAM_B[:3], 180)
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
-MAP_MARGIN  = 40
-PANEL_W     = 260
-MIN_STATION_R = 4
-MAX_STATION_R = 14
-LOG_LINES   = 12
+MAP_MARGIN  = 30
+PANEL_W     = 280
+MIN_STATION_R = 7
+MAX_STATION_R = 22
+LOG_LINES   = 14
 
 
 class Display:
@@ -64,8 +64,8 @@ class Display:
 
         pygame.init()
         info = pygame.display.Info()
-        self.W = min(1400, info.current_w - 40)
-        self.H = min(820,  info.current_h - 60)
+        self.W = info.current_w - 20
+        self.H = info.current_h - 60
         self.screen = pygame.display.set_mode((self.W, self.H))
         pygame.display.set_caption("Rail Strategy Game")
 
@@ -231,6 +231,24 @@ class Display:
                 pygame.draw.circle(self.screen, CHALLENGE_C, px, r + 5, 2)
 
             pygame.draw.circle(self.screen, colour, px, r)
+
+            # Chip margin label (e.g. "A+3" or "B+2")
+            chips_a = station.chips_team_a
+            chips_b = station.chips_team_b
+            if chips_a > 0 or chips_b > 0:
+                if chips_a > chips_b:
+                    margin = chips_a - chips_b
+                    label = f"A+{margin}"
+                    lc = TEAM_A
+                elif chips_b > chips_a:
+                    margin = chips_b - chips_a
+                    label = f"B+{margin}"
+                    lc = TEAM_B
+                else:
+                    label = f"={chips_a}"
+                    lc = CONTESTED
+                lsurf = self.font_sm.render(label, True, lc)
+                self.screen.blit(lsurf, (px[0] - lsurf.get_width() // 2, px[1] + r + 2))
 
             # Team position markers (ring around station)
             team_a = state.teams["A"]
