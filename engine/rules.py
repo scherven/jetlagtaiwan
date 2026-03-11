@@ -82,17 +82,20 @@ def place_chips_at_stop(
 
     if team.coins <= 0:
         # Zero-coins travel rule: pay coin penalty only — cannot contest.
-        if opp_chips > our_chips:
-            team.coins -= enemy_station_penalty   # bleed 3 coins, place nothing
-            chips_to_place = 0
-        else:
-            team.coins -= own_station_penalty     # bleed 1 coin, place 1 chip minimum
-            chips_to_place = 1
+        # if opp_chips > our_chips:
+        #     team.coins -= enemy_station_penalty   # bleed 3 coins, place nothing
+        #     chips_to_place = 0
+        # else:
+        #     team.coins -= own_station_penalty     # bleed 1 coin, place 1 chip minimum
+        #     chips_to_place = 1
+        chips_to_place = 0
     else:
         if opp_chips > our_chips:
             chips_to_place = opp_chips - our_chips + 1
-        else:
+        elif opp_chips == our_chips:
             chips_to_place = 1
+        else:
+            chips_to_place = 0
         team.coins -= chips_to_place
 
     if chips_to_place > 0:

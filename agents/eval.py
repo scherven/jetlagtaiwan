@@ -90,9 +90,11 @@ def encode_observation(
             chal_value[i]   = challenge_map[s.id] / max_chal_val
 
     total_days = 5  # spec default; passed in via num_days param if needed
-
+    us_coins = us.coins
+    if us_coins < 0:
+        us_coins *= 100
     scalar = np.array([
-        us.coins  / starting_coins,
+        us_coins  / starting_coins,
         opp.coins / starting_coins,
         game_state.sim_minute / (DAY_DURATION * total_days),
         (game_state.day - 1) / (total_days - 1) if total_days > 1 else 0.0,

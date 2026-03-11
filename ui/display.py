@@ -253,9 +253,9 @@ class Display:
             # Team position markers (ring around station)
             team_a = state.teams["A"]
             team_b = state.teams["B"]
-            if team_a.current_station == sid and not team_a.is_in_transit():
+            if team_a.current_station == sid:# and not team_a.is_in_transit():
                 pygame.draw.circle(self.screen, TEAM_A, px, r + 7, 3)
-            if team_b.current_station == sid and not team_b.is_in_transit():
+            if team_b.current_station == sid:# and not team_b.is_in_transit():
                 pygame.draw.circle(self.screen, TEAM_B, px, r + 9, 3)
 
     def _draw_routes(self, state: GameState) -> None:

@@ -16,7 +16,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import gymnasium as gym
-from pettingzoo import AECEnv
+from pettingzoo import AECEnv, ParallelEnv
 from pettingzoo.utils import wrappers
 
 from agents.eval import encode_observation, observation_size
@@ -236,3 +236,182 @@ class RailGameEnv(AECEnv):
         self._accumulate_rewards()
         if self.agents:
             self.agent_selection = self.agents[0]
+
+
+def make_parallel_env(config: dict, rail_network: RailNetwork) -> ParallelEnv:
+    """Factory: create a ParallelEnv for PPO training (no aec_to_parallel needed)."""
+    return RailGameParallelEnv(config, rail_network)
+
+
+class RailGameParallelEnv(ParallelEnv):
+    """
+    PettingZoo ParallelEnv for PPO training.
+
+    Each step() receives actions for all living agents.  Only agents in
+    _decision_queue (idle this tick) actually have their actions applied;
+    actions for agents currently in-transit are silently ignored (auto-wait).
+    The sim then advances until at least one agent is idle again.
+    """
+
+    metadata = {
+        "render_modes": [],
+        "name": "rail_game_v0",
+        "is_parallelizable": True,
+    }
+
+    def __init__(self, config: dict, rail_network: RailNetwork):
+        super().__init__()
+        self.config = config
+        self.net = rail_network
+        self.possible_agents = ["A", "B"]
+        self.render_mode = None
+
+        N = len(rail_network.stations)
+        K = config["agents"]["max_departures_k"]
+        obs_sz = observation_size(N, K)
+
+        self.observation_spaces = {
+            a: gym.spaces.Box(low=-1.0, high=20.0, shape=(obs_sz,), dtype=np.float32)
+            for a in self.possible_agents
+        }
+        self.action_spaces = {
+            a: gym.spaces.Discrete(K + 2)
+            for a in self.possible_agents
+        }
+
+        self._K = K
+        self._starting_coins: int = config["game"]["starting_coins"]
+        self._starting_station_id: Optional[str] = None
+        self._sim: Optional[Simulation] = None
+        self._decision_queue: List[str] = []
+        self._departures: Dict[str, List[Departure]] = {}
+
+    # ------------------------------------------------------------------
+    # PettingZoo ParallelEnv API
+    # ------------------------------------------------------------------
+
+    def observation_space(self, agent: str) -> gym.Space:
+        return self.observation_spaces[agent]
+
+    def action_space(self, agent: str) -> gym.Space:
+        return self.action_spaces[agent]
+
+    def reset(self, seed: Optional[int] = None, options=None):
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+
+        self._init_sim()
+        self.agents = list(self.possible_agents)
+        self._decision_queue = []
+        self._departures = {}
+
+        self._advance_to_decision()
+
+        obs = {a: self._observe(a) for a in self.possible_agents}
+        infos = {a: {} for a in self.possible_agents}
+        return obs, infos
+
+    def step(self, actions):
+        # Apply actions for agents that are idle this tick
+        for agent in self._decision_queue:
+            action = actions.get(agent, self._K + 1)  # default: wait
+            self._apply_action(agent, action, self._departures.get(agent, []))
+
+        rewards = {a: self._compute_step_reward(a) for a in self.possible_agents}
+
+        # Advance sim to next decision point
+        self._decision_queue = []
+        self._departures = {}
+        if not self._sim.done:
+            self._sim.step()
+        self._advance_to_decision()
+
+        terminations = {a: False for a in self.possible_agents}
+        truncations = {a: False for a in self.possible_agents}
+        infos = {a: {} for a in self.possible_agents}
+
+        if self._sim.done:
+            self._add_terminal_rewards(rewards, terminations)
+            self.agents = []
+
+        obs = {a: self._observe(a) for a in self.possible_agents}
+        return obs, rewards, terminations, truncations, infos
+
+    def render(self):
+        pass
+
+    def close(self):
+        pass
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _init_sim(self):
+        def noop(state, net, tid, deps):
+            return self._K + 1  # wait — env drives decisions externally
+
+        self._sim = Simulation(self.config, self.net, noop, noop)
+        self._sim.skip_agent_queries = True
+        self._starting_station_id = self._sim._starting_station_id
+
+    def _idle_teams(self) -> List[str]:
+        result = []
+        for tid in ("A", "B"):
+            if tid not in self._sim._transit and tid not in self._sim._challenge_attempts:
+                result.append(tid)
+        return result
+
+    def _advance_to_decision(self):
+        max_steps = DAY_DURATION * self.config["game"]["num_days"] + 100
+        for _ in range(max_steps):
+            if self._sim.done:
+                return
+            idle = self._idle_teams()
+            if idle:
+                self._decision_queue = idle
+                for tid in idle:
+                    self._departures[tid] = self._sim.get_available_departures(tid)
+                return
+            self._sim.step()
+
+    def _apply_action(self, team_id: str, action: int, departures: List[Departure]):
+        K = self._K
+        wall = sim_minute_to_wall_clock(self._sim.state.sim_minute)
+        if action == K:
+            self._sim._attempt_challenge(team_id, wall)
+        elif action == K + 1:
+            pass  # wait
+        elif 0 <= action < len(departures):
+            self._sim._board_train(team_id, departures[action], wall)
+
+    def _compute_step_reward(self, agent: str) -> float:
+        state = self._sim.state
+        opp = "B" if agent == "A" else "A"
+        sid = self._starting_station_id
+        our = count_controlled_stations(state, agent, sid)
+        opp_ctrl = count_controlled_stations(state, opp, sid)
+        return 0.01 * our - 0.01 * opp_ctrl
+
+    def _add_terminal_rewards(self, rewards: dict, terminations: dict):
+        state = self._sim.state
+        sid = self._starting_station_id
+        total = max(sum(1 for s in state.stations if s != sid), 1)
+        for agent in self.possible_agents:
+            opp = "B" if agent == "A" else "A"
+            our = count_controlled_stations(state, agent, sid)
+            opp_ctrl = count_controlled_stations(state, opp, sid)
+            rewards[agent] = rewards.get(agent, 0.0) + (our - opp_ctrl) / total
+            terminations[agent] = True
+
+    def _observe(self, agent: str) -> np.ndarray:
+        return encode_observation(
+            self._sim.state,
+            self.net,
+            agent,
+            self._departures.get(agent, []),
+            self._starting_station_id,
+            k=self._K,
+            starting_coins=self._starting_coins,
+        )
