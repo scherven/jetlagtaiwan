@@ -15,6 +15,7 @@ stop_times.txt, routes.txt).  Two merge strategies are supported:
 
 from __future__ import annotations
 
+import bisect
 import logging
 import os
 from collections import defaultdict
@@ -313,7 +314,6 @@ class RailNetwork:
         Uses binary search on the pre-sorted schedule list for O(log N + k) performance
         instead of O(N) linear scan.
         """
-        import bisect
         deps = self.schedules.get(station_id, [])
         if not deps:
             return []

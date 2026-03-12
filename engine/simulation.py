@@ -214,7 +214,6 @@ class Simulation:
     def _compute_reachable(self, station_id: str) -> set:
         """Return the set of station IDs reachable from station_id in a single trip
         over the full operating day (no time-window restriction)."""
-        from engine.clock import DAY_DURATION
         deps = get_valid_departures(
             self.net, station_id, 0,
             window_minutes=DAY_DURATION,

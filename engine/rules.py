@@ -294,8 +294,6 @@ def get_valid_departures(
     One option is generated per unique reachable destination (earliest departure
     wins). Options are sorted by arrival time so the nearest destinations come first.
     """
-    from engine.clock import sim_minute_to_wall_clock
-
     current_wall = sim_minute_to_wall_clock(current_sim_minute)
     until_wall = current_wall + window_minutes
 

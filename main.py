@@ -20,7 +20,16 @@ import logging
 import sys
 import time
 
+import numpy as np
+import pygame
 import yaml
+from stable_baselines3 import PPO
+
+from agents.eval import encode_observation
+from agents.heuristic import HeuristicAgent
+from engine.rail_network import RailNetwork
+from engine.simulation import Simulation
+from ui.display import Display
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -30,14 +39,11 @@ logging.basicConfig(
 def _load_rl_agent(model_path: str, team_label: str, config: dict):
     """Load a trained SB3 PPO model and return an agent callback."""
     try:
-        from stable_baselines3 import PPO
-        import numpy as np
         model = PPO.load(model_path)
         k = config["agents"]["max_departures_k"]
         starting_coins = config["game"]["starting_coins"]
         print(f"  Loaded RL model for Team {team_label}: {model_path} (k={k})")
         def agent_fn(state, rail_network, team_id, departures):
-            from agents.eval import encode_observation
             obs = encode_observation(state, rail_network, team_id, departures,
                                      _STARTING_ID, k=k, starting_coins=starting_coins)
             action, _ = model.predict(obs, deterministic=True)
@@ -67,7 +73,6 @@ def main():
     # Build rail network
     # ------------------------------------------------------------------ #
     print("Loading rail network...")
-    from engine.rail_network import RailNetwork
     feed_dirs = config["network"]["feeds"]
     merge_strategy = config["network"].get("merge_strategy", "parent")
     net = RailNetwork(feed_dirs, merge_strategy=merge_strategy)
@@ -88,8 +93,6 @@ def main():
     # ------------------------------------------------------------------ #
     global _STARTING_ID
     _STARTING_ID = starting_station_id
-
-    from agents.heuristic import HeuristicAgent
 
     heuristic_a = HeuristicAgent(config)
     heuristic_a.starting_station_id = starting_station_id
@@ -117,7 +120,6 @@ def main():
     # ------------------------------------------------------------------ #
     # Build simulation
     # ------------------------------------------------------------------ #
-    from engine.simulation import Simulation
     sim = Simulation(config, net, agent_a, agent_b)
 
     # ------------------------------------------------------------------ #
@@ -137,9 +139,6 @@ def main():
     # ------------------------------------------------------------------ #
     # Pygame UI
     # ------------------------------------------------------------------ #
-    import pygame
-    from ui.display import Display
-
     display = Display(config, net, starting_station_id)
 
     # Set starting speed

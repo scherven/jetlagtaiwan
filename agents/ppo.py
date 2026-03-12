@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
+import multiprocessing as mp
 import os
 import random
 import sys
@@ -29,34 +31,19 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import supersuit as ss
 import yaml
+from pettingzoo.utils.conversions import aec_to_parallel
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import VecMonitor
+
+from .env_wrapper import RailGameEnv, make_parallel_env
+from agents.heuristic import HeuristicAgent
+from engine.rail_network import RailNetwork
+from engine.rules import count_controlled_stations
 
 
-def _check_imports():
-    missing = []
-    for pkg in ("stable_baselines3", "pettingzoo", "supersuit", "gymnasium"):
-        try:
-            __import__(pkg)
-        except ImportError:
-            missing.append(pkg)
-    if missing:
-        print(f"Missing packages: {', '.join(missing)}")
-        print("Run: pip install stable-baselines3 pettingzoo supersuit gymnasium")
-        sys.exit(1)
-
-from .env_wrapper import make_parallel_env
 def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
-    _check_imports()
-
-    import supersuit as ss
-    from pettingzoo.utils.conversions import aec_to_parallel
-    from stable_baselines3 import PPO
-    from stable_baselines3.common.vec_env import VecMonitor
-
-    from agents.env_wrapper import RailGameEnv
-    from agents.heuristic import HeuristicAgent
-    from engine.rules import count_controlled_stations
-
     tcfg = config["training"]
     total_timesteps = extra_timesteps or tcfg["total_timesteps"]
     eval_interval = tcfg["eval_interval"]
@@ -80,8 +67,6 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
     # Both agents share one policy; SB3 collects rollouts from both.
     # ------------------------------------------------------------------ #
     def make_raw():
-        # aec = RailGameEnv(config, rail_network)
-        # return aec_to_parallel(aec)
         return make_parallel_env(config, rail_network)
 
     env = make_raw()
@@ -188,10 +173,6 @@ def evaluate_vs_heuristic(
 
     Runs games in parallel across available CPU cores for speed.
     """
-    import io
-    import os
-    import multiprocessing as mp
-
     # Serialize model to bytes so workers can reconstruct it without sharing
     # a single model object across processes.
     buf = io.BytesIO()
@@ -225,16 +206,11 @@ _worker_rail_network = None
 def _eval_worker_init(feeds, merge_strategy):
     """Called once per worker process to load the rail network."""
     global _worker_rail_network
-    from engine.rail_network import RailNetwork
     _worker_rail_network = RailNetwork(feeds, merge_strategy=merge_strategy)
 
 
 def _eval_worker_run(args) -> str:
     """Run a single eval game in a worker process. Returns 'A', 'B', or 'tie'."""
-    import io
-    from stable_baselines3 import PPO
-    from agents.heuristic import HeuristicAgent
-
     model_bytes, config, _seed = args
     model = PPO.load(io.BytesIO(model_bytes))
     heuristic = HeuristicAgent(config)
@@ -246,10 +222,6 @@ def _run_one_episode(model, heuristic, config: dict, rail_network) -> str:
     Run one game: RL model as A, heuristic as B.
     Returns 'A', 'B', or 'tie'.
     """
-    from agents.env_wrapper import RailGameEnv
-    from engine.rules import count_controlled_stations
-    import numpy as np
-
     env = RailGameEnv(config, rail_network)
     obs_dict, _ = env.reset()
     # Make sure heuristic knows the starting station so cost calculations are correct.
@@ -296,7 +268,6 @@ def main():
     with open("config.yaml") as f:
         config = yaml.safe_load(f)
 
-    from engine.rail_network import RailNetwork
     print("Loading rail network...")
     net = RailNetwork(
         config["network"]["feeds"],
@@ -315,5 +286,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import yaml
     main()
