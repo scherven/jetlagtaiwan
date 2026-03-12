@@ -59,6 +59,10 @@ class GameState:
     challenges: List[Challenge]
     is_paused: bool = False
     speed_multiplier: float = 1.0
+    # Cached controlled-station counts (excluding starting station).
+    # Updated incrementally by place_chips_at_stop via _update_control_cache().
+    _ctrl_cache: Dict[str, int] = field(default_factory=lambda: {"A": 0, "B": 0})
+    _ctrl_cache_starting_id: Optional[str] = None
 
     def sim_minute_to_clock(self) -> str:
         """Convert sim_minute to HH:MM string (0 = 07:30)."""

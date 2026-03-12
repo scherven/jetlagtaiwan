@@ -10,6 +10,7 @@ network:
 
 game:
   starting_coins: 50
+  daily_stipend: 20          # coins given to each team at the start of each new day
   starting_station: "Times Sq-42 St"
   num_days: 5
   day_start: "07:30"
@@ -35,8 +36,8 @@ simulation:
   clock_increment_minutes: 1
 
 agents:
-  max_departures_k: 10 # K in observation space
-  heuristic_reachability_window: 60 # minutes ahead to scan for departures
+  max_departures_k: 30 # K in observation space
+  heuristic_reachability_window: 120 # minutes ahead to scan for departures
   heuristic_extra_chips: 0  # extra chips placed above minimum on neutral/contested stops (0–4)
   heuristic_challenge_window: 180  # wider lookahead (minutes) used specifically to find challenge stations
   heuristic_challenge_k: 50        # number of departures to scan when searching for a challenge station
@@ -44,7 +45,7 @@ agents:
 
 training:
   algorithm: "PPO"
-  total_timesteps: 5_000_000_000
+  total_timesteps: 5_000_000
   learning_rate: 0.0003
   n_steps: 2048 # PPO rollout length
   batch_size: 64
@@ -52,8 +53,8 @@ training:
   gamma: 0.99
   clip_range: 0.2
   opponent_swap_interval: 50 # episodes between opponent policy swaps
-  eval_interval: 200 # episodes between heuristic evaluations
-  eval_episodes: 100 # rolling window size for win rate
+  eval_interval: 500 # episodes between heuristic evaluations
+  eval_episodes: 20  # games per evaluation (fast; increase once model improves)
   win_rate_target: 0.70 # stop training when this is reached
   log_file: "training_log.csv"
   snapshot_dir: "checkpoints/"

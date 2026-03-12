@@ -308,11 +308,23 @@ class RailNetwork:
         from_minute: int,
         to_minute: int,
     ) -> List[Departure]:
-        """Return departures from station_id with departure_minute in [from_minute, to_minute)."""
-        return [
-            d for d in self.schedules.get(station_id, [])
-            if from_minute <= d.departure_minute < to_minute
-        ]
+        """Return departures from station_id with departure_minute in [from_minute, to_minute).
+
+        Uses binary search on the pre-sorted schedule list for O(log N + k) performance
+        instead of O(N) linear scan.
+        """
+        import bisect
+        deps = self.schedules.get(station_id, [])
+        if not deps:
+            return []
+        # Binary-search for first departure >= from_minute
+        lo = bisect.bisect_left(deps, from_minute, key=lambda d: d.departure_minute)
+        result = []
+        for d in deps[lo:]:
+            if d.departure_minute >= to_minute:
+                break
+            result.append(d)
+        return result
 
     def station_by_name(self, name: str) -> Optional[StopNode]:
         """Case-insensitive station lookup by name."""

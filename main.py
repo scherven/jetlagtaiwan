@@ -27,18 +27,19 @@ logging.basicConfig(
     format="%(levelname)s %(name)s: %(message)s",
 )
 
-def _load_rl_agent(model_path: str, team_label: str):
+def _load_rl_agent(model_path: str, team_label: str, config: dict):
     """Load a trained SB3 PPO model and return an agent callback."""
     try:
         from stable_baselines3 import PPO
         import numpy as np
         model = PPO.load(model_path)
-        print(f"  Loaded RL model for Team {team_label}: {model_path}")
+        k = config["agents"]["max_departures_k"]
+        starting_coins = config["game"]["starting_coins"]
+        print(f"  Loaded RL model for Team {team_label}: {model_path} (k={k})")
         def agent_fn(state, rail_network, team_id, departures):
             from agents.eval import encode_observation
-            # obs needs a dummy starting_station_id — get it from state
             obs = encode_observation(state, rail_network, team_id, departures,
-                                     _STARTING_ID, k=10, starting_coins=50)
+                                     _STARTING_ID, k=k, starting_coins=starting_coins)
             action, _ = model.predict(obs, deterministic=True)
             return int(action)
         return agent_fn
@@ -95,8 +96,8 @@ def main():
     heuristic_b = HeuristicAgent(config)
     heuristic_b.starting_station_id = starting_station_id
 
-    rl_a = _load_rl_agent(args.model_a, "A") if args.model_a else None
-    rl_b = _load_rl_agent(args.model_b, "B") if args.model_b else None
+    rl_a = _load_rl_agent(args.model_a, "A", config) if args.model_a else None
+    rl_b = _load_rl_agent(args.model_b, "B", config) if args.model_b else None
 
     def agent_a(state, rail_network, team_id, departures):
         if rl_a:

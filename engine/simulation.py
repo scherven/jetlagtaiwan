@@ -261,6 +261,7 @@ class Simulation:
                 enemy_station_penalty=tcfg["enemy_station_penalty"],
                 extra_chips=team.desired_extra_chips,
                 max_chips_per_station=self.config["game"].get("max_chips_per_station", 5),
+                game_state=self.state,
             )
 
             team.current_station = stop_id
@@ -458,7 +459,12 @@ class Simulation:
         else:
             self.state.day += 1
             self.state.sim_minute = 0
-            events.append(f"=== Day {self.state.day} started ===")
+            # Give each team a daily coin stipend so low-coin deadlocks are temporary.
+            stipend = self.config["game"].get("daily_stipend", 0)
+            if stipend > 0:
+                for team_id in ("A", "B"):
+                    self.state.teams[team_id].coins += stipend
+                events.append(f"=== Day {self.state.day} started === (stipend +{stipend} each)")
 
         return events
 

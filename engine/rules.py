@@ -83,6 +83,7 @@ def place_chips_at_stop(
     enemy_station_penalty: int = 3,  # kept for signature compat, not currently used
     extra_chips: int = 0,
     max_chips_per_station: int = 5,
+    game_state=None,  # GameState | None — pass to keep control cache consistent
 ) -> None:
     """
     Place chips for team at a single stop according to the game rules.
@@ -107,6 +108,7 @@ def place_chips_at_stop(
 
     our_chips = getattr(station, chip_attr)
     opp_chips = getattr(station, opp_attr)
+    old_controller = station.controlling_team()
 
     if team.coins <= 0:
         chips_to_place = 0
@@ -130,6 +132,18 @@ def place_chips_at_stop(
 
     if chips_to_place > 0:
         setattr(station, chip_attr, our_chips + chips_to_place)
+        # Update incremental control cache if GameState provided.
+        if game_state is not None:
+            new_controller = station.controlling_team()
+            if new_controller != old_controller:
+                cache = game_state._ctrl_cache
+                sid = game_state._ctrl_cache_starting_id
+                if station.id != sid:
+                    if old_controller is not None:
+                        cache[old_controller] = cache.get(old_controller, 1) - 1
+                    if new_controller is not None:
+                        cache[new_controller] = cache.get(new_controller, 0) + 1
+
     logger.debug(
         "Team %s placed %d chips at %s (balance now %d)",
         team.id, chips_to_place, station.name, team.coins,
@@ -223,14 +237,25 @@ def count_controlled_stations(
     team_id: str,
     starting_station_id: str,
 ) -> int:
-    """Count how many stations team controls (excluding starting station)."""
-    count = 0
-    for sid, station in game_state.stations.items():
-        if sid == starting_station_id:
-            continue
-        if station.controlling_team() == team_id:
-            count += 1
-    return count
+    """Count how many stations team controls (excluding starting station).
+
+    Uses the incremental cache on GameState when available and warm;
+    falls back to a full scan (and warms the cache) otherwise.
+    """
+    # Warm cache on first call or if starting station changed.
+    if (game_state._ctrl_cache_starting_id != starting_station_id
+            or not game_state._ctrl_cache):
+        counts: dict = {"A": 0, "B": 0}
+        for sid, station in game_state.stations.items():
+            if sid == starting_station_id:
+                continue
+            ctrl = station.controlling_team()
+            if ctrl is not None:
+                counts[ctrl] = counts.get(ctrl, 0) + 1
+        game_state._ctrl_cache = counts
+        game_state._ctrl_cache_starting_id = starting_station_id
+
+    return game_state._ctrl_cache.get(team_id, 0)
 
 
 def compute_winner(

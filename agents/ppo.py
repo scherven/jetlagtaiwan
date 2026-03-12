@@ -143,7 +143,7 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
             model.save(str(snap_path))
 
         # Evaluate vs heuristic
-        win_rate =best_win_rate + 0.0000000001 # evaluate_vs_heuristic(model, config, rail_network, n_episodes=eval_episodes)
+        win_rate = evaluate_vs_heuristic(model, config, rail_network, n_episodes=eval_episodes)
         elapsed = time.time() - t0
 
         print(
@@ -185,20 +185,60 @@ def evaluate_vs_heuristic(
     """
     Run n_episodes with the RL model as Team A and the heuristic as Team B.
     Returns the fraction of episodes won by Team A (RL agent).
+
+    Runs games in parallel across available CPU cores for speed.
     """
-    from agents.heuristic import HeuristicAgent
-    from engine.simulation import Simulation
-    from engine.rules import count_controlled_stations
+    import io
+    import os
+    import multiprocessing as mp
 
-    heuristic = HeuristicAgent(config)
+    # Serialize model to bytes so workers can reconstruct it without sharing
+    # a single model object across processes.
+    buf = io.BytesIO()
+    model.save(buf)
+    model_bytes = buf.getvalue()
 
-    wins = 0
-    for _ in range(n_episodes):
-        result = _run_one_episode(model, heuristic, config, rail_network)
-        if result == "A":
-            wins += 1
+    n_workers = min(n_episodes, max(1, os.cpu_count() - 1))
 
+    args = [(model_bytes, config, i) for i in range(n_episodes)]
+
+    # Use spawn-safe pool with network loaded once per worker via initializer.
+    feeds = config["network"]["feeds"]
+    merge = config["network"].get("merge_strategy", "parent")
+    with mp.Pool(
+        processes=n_workers,
+        initializer=_eval_worker_init,
+        initargs=(feeds, merge),
+    ) as pool:
+        results = pool.map(_eval_worker_run, args)
+
+    wins = sum(1 for r in results if r == "A")
     return wins / n_episodes
+
+
+# ------------------------------------------------------------------
+# Worker-process state (loaded once per worker via initializer)
+# ------------------------------------------------------------------
+_worker_rail_network = None
+
+
+def _eval_worker_init(feeds, merge_strategy):
+    """Called once per worker process to load the rail network."""
+    global _worker_rail_network
+    from engine.rail_network import RailNetwork
+    _worker_rail_network = RailNetwork(feeds, merge_strategy=merge_strategy)
+
+
+def _eval_worker_run(args) -> str:
+    """Run a single eval game in a worker process. Returns 'A', 'B', or 'tie'."""
+    import io
+    from stable_baselines3 import PPO
+    from agents.heuristic import HeuristicAgent
+
+    model_bytes, config, _seed = args
+    model = PPO.load(io.BytesIO(model_bytes))
+    heuristic = HeuristicAgent(config)
+    return _run_one_episode(model, heuristic, config, _worker_rail_network)
 
 
 def _run_one_episode(model, heuristic, config: dict, rail_network) -> str:
