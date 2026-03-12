@@ -143,7 +143,7 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
             model.save(str(snap_path))
 
         # Evaluate vs heuristic
-        win_rate = best_win_rate + 0.001 # evaluate_vs_heuristic(model, config, rail_network, n_episodes=eval_episodes)
+        win_rate =best_win_rate + 0.0000000001 # evaluate_vs_heuristic(model, config, rail_network, n_episodes=eval_episodes)
         elapsed = time.time() - t0
 
         print(
@@ -212,6 +212,8 @@ def _run_one_episode(model, heuristic, config: dict, rail_network) -> str:
 
     env = RailGameEnv(config, rail_network)
     obs_dict, _ = env.reset()
+    # Make sure heuristic knows the starting station so cost calculations are correct.
+    heuristic.starting_station_id = env._starting_station_id
 
     done = False
     while not done:

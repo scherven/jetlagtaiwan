@@ -26,13 +26,21 @@ def compute_route_chip_cost(
     stop_ids: List[str],
     team_id: str,
     starting_station_id: str,
+    extra_chips: int = 0,
+    max_chips_per_station: int = 5,
 ) -> int:
     """
     Compute total chip cost for travelling through stop_ids (in order).
-    Returns the number of chips needed at each stop:
-      - 1 chip for neutral or own station
-      - opponent_chips + 1 for opponent-controlled stations
-    Starting station is free (skip it from cost).
+
+    Per-stop cost:
+      - 0  if we already control the station (our chips > opponent's)
+      - 1  if neutral (tie), plus any extra_chips desired
+      - (opp - our + 1)  if opponent controls, plus extra_chips desired
+
+    extra_chips: additional chips to place beyond the minimum on neutral /
+                 contested stops (0 = minimum to claim/contest only).
+    max_chips_per_station: hard cap on chips any one team can hold at a stop.
+    Starting station is always free.
     """
     total = 0
     opponent_id = "B" if team_id == "A" else "A"
@@ -47,12 +55,19 @@ def compute_route_chip_cost(
             continue
         our_chips = getattr(station, chip_attr)
         opp_chips = getattr(station, opp_attr)
-        if opp_chips > our_chips:
-            # Opponent controls: need to exceed
-            cost = opp_chips - our_chips + 1
+
+        if our_chips > opp_chips:
+            # We already control this station: free entry, no chips needed.
+            cost = 0
+        elif opp_chips > our_chips:
+            # Opponent controls: minimum to take control, plus any extra.
+            min_cost = opp_chips - our_chips + 1
+            cost = min(min_cost + extra_chips, max_chips_per_station - our_chips)
         else:
-            cost = 1  # neutral or we already control: minimum 1 chip
-        total += cost
+            # Neutral (tie): 1 chip to claim, plus any extra.
+            cost = min(1 + extra_chips, max_chips_per_station - our_chips)
+
+        total += max(0, cost)
     return total
 
 
@@ -64,12 +79,25 @@ def place_chips_at_stop(
     station: Station,
     team: Team,
     starting_station_id: str,
-    own_station_penalty: int = 1,
-    enemy_station_penalty: int = 3,
+    own_station_penalty: int = 1,   # kept for signature compat, not currently used
+    enemy_station_penalty: int = 3,  # kept for signature compat, not currently used
+    extra_chips: int = 0,
+    max_chips_per_station: int = 5,
 ) -> None:
     """
     Place chips for team at a single stop according to the game rules.
     Modifies station.chips_team_* and team.coins in place.
+
+    Placement rules:
+      - Starting station: always free, skip.
+      - Own station (our > opp): free entry; can optionally add extra_chips
+        for defensive fortification.
+      - Neutral station (tie): 1 chip to claim, plus up to extra_chips more.
+      - Opponent station (opp > our): minimum chips to take control, plus
+        up to extra_chips more.
+      - Hard cap: a team may never hold more than max_chips_per_station at
+        any single stop.
+      - Zero-balance: no chips placed (team is broke).
     """
     if station.id == starting_station_id:
         return  # starting station is always free and neutral
@@ -81,21 +109,23 @@ def place_chips_at_stop(
     opp_chips = getattr(station, opp_attr)
 
     if team.coins <= 0:
-        # Zero-coins travel rule: pay coin penalty only — cannot contest.
-        # if opp_chips > our_chips:
-        #     team.coins -= enemy_station_penalty   # bleed 3 coins, place nothing
-        #     chips_to_place = 0
-        # else:
-        #     team.coins -= own_station_penalty     # bleed 1 coin, place 1 chip minimum
-        #     chips_to_place = 1
         chips_to_place = 0
     else:
         if opp_chips > our_chips:
-            chips_to_place = opp_chips - our_chips + 1
+            # Minimum to take control, plus requested extra.
+            min_needed = opp_chips - our_chips + 1
+            chips_to_place = min_needed + extra_chips
         elif opp_chips == our_chips:
-            chips_to_place = 1
+            # Neutral: 1 to claim, plus requested extra.
+            chips_to_place = 1 + extra_chips
         else:
-            chips_to_place = 0
+            # We already control: free entry; only place if extra requested.
+            chips_to_place = extra_chips
+
+        # Apply hard cap: can't exceed max_chips_per_station.
+        chips_to_place = max(0, min(chips_to_place, max_chips_per_station - our_chips))
+        # Can't spend more than we have.
+        chips_to_place = min(chips_to_place, team.coins)
         team.coins -= chips_to_place
 
     if chips_to_place > 0:
@@ -149,9 +179,14 @@ def spawn_challenges(
     steal_fraction: float = 0.20,
     steal_probability: float = 0.25,
     count: int = 1,
+    reachable_stations: Optional[set] = None,
 ) -> List[Challenge]:
     """
     Spawn `count` new challenges on random stations (no duplicates, not on starting station).
+
+    reachable_stations: if provided, challenges are only placed at stations in
+    this set.  Pass the union of stations reachable from current team positions
+    so agents can always navigate to the challenge using a direct single-leg trip.
     Returns list of newly spawned challenges.
     """
     occupied = {c.station_id for c in game_state.challenges}
@@ -159,17 +194,20 @@ def spawn_challenges(
         sid
         for sid in game_state.stations
         if sid not in occupied and sid != starting_station_id
+        and (reachable_stations is None or sid in reachable_stations)
     ]
     random.shuffle(candidates)
     spawned = []
     for sid in candidates[:count]:
         ctype = "steal" if random.random() < steal_probability else "chip_gain"
-        base = steal_fraction if ctype == "steal" else chip_gain_base
+        # chip_gain base_value = coins reward (e.g. 50)
+        # steal base_value     = fraction of opponent coins (e.g. 0.20 = 20%)
+        base_value: float = steal_fraction if ctype == "steal" else float(chip_gain_base)
         c = Challenge(
             id=str(uuid.uuid4()),
             station_id=sid,
             type=ctype,
-            base_value=base if ctype == "chip_gain" else int(base * 100),
+            base_value=base_value,
             day=game_state.day,
         )
         spawned.append(c)

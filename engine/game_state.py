@@ -29,6 +29,7 @@ class Team:
     destination_station: Optional[str] = None
     arrival_time: Optional[int] = None   # simulation minute of final destination
     remaining_stops: List[str] = field(default_factory=list)  # ordered upcoming stop IDs on current journey
+    desired_extra_chips: int = 0         # extra chips to place above minimum on neutral/contested stops
 
     def is_in_transit(self) -> bool:
         return self.destination_station is not None
@@ -41,9 +42,9 @@ class Team:
 class Challenge:
     id: str
     station_id: str
-    type: str         # "chip_gain" | "steal"
-    base_value: int   # 50 for chip_gain, 20% for steal (stored as fraction 0.20)
-    day: int          # which day it was spawned (for multiplier)
+    type: str          # "chip_gain" | "steal"
+    base_value: float  # coins for chip_gain (e.g. 50); fraction for steal (e.g. 0.20)
+    day: int           # which day it was spawned (for multiplier)
 
     def current_value(self, daily_multiplier: float = 1.10) -> float:
         return self.base_value * (daily_multiplier ** (self.day - 1))

@@ -14,6 +14,7 @@ game:
   num_days: 5
   day_start: "07:30"
   day_end: "17:30"
+  max_chips_per_station: 5   # hard cap: one team can hold at most this many chips at any stop
 
 travel:
   min_chips_per_stop: 1
@@ -36,10 +37,14 @@ simulation:
 agents:
   max_departures_k: 10 # K in observation space
   heuristic_reachability_window: 60 # minutes ahead to scan for departures
+  heuristic_extra_chips: 0  # extra chips placed above minimum on neutral/contested stops (0–4)
+  heuristic_challenge_window: 180  # wider lookahead (minutes) used specifically to find challenge stations
+  heuristic_challenge_k: 50        # number of departures to scan when searching for a challenge station
+  heuristic_low_coins_threshold: 15  # below this coin balance, prioritise challenges over expansion
 
 training:
   algorithm: "PPO"
-  total_timesteps: 5_000_000
+  total_timesteps: 5_000_000_000
   learning_rate: 0.0003
   n_steps: 2048 # PPO rollout length
   batch_size: 64

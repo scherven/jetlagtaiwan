@@ -156,6 +156,15 @@ class Simulation:
             )
         self._starting_station_id = start_node.id
 
+        # Pre-compute the full-day reachable set from the starting station.
+        # Challenges are only spawned here so agents can always reach them in
+        # a single-leg trip (no transfers required).
+        self._starting_reachable: set = self._compute_reachable(start_node.id)
+        logger.info(
+            "Reachable from starting station: %d / %d stations.",
+            len(self._starting_reachable), len(self.net.stations),
+        )
+
         stations: Dict[str, Station] = {
             sid: Station(id=sid, name=node.name, lat=node.lat, lon=node.lon)
             for sid, node in self.net.stations.items()
@@ -183,7 +192,7 @@ class Simulation:
             challenges=[],
         )
 
-        # Spawn initial challenges
+        # Spawn initial challenges (restricted to single-leg reachable stations)
         chal_cfg = self.config["challenges"]
         initial = spawn_challenges(
             state,
@@ -192,10 +201,33 @@ class Simulation:
             steal_fraction=chal_cfg["steal_fraction"],
             steal_probability=chal_cfg["steal_probability"],
             count=chal_cfg["initial_count"],
+            reachable_stations=self._starting_reachable,
         )
         state.challenges.extend(initial)
         logger.info("Game initialised. %d challenges spawned.", len(initial))
         return state
+
+    # ------------------------------------------------------------------
+    # Reachability helpers
+    # ------------------------------------------------------------------
+
+    def _compute_reachable(self, station_id: str) -> set:
+        """Return the set of station IDs reachable from station_id in a single trip
+        over the full operating day (no time-window restriction)."""
+        from engine.clock import DAY_DURATION
+        deps = get_valid_departures(
+            self.net, station_id, 0,
+            window_minutes=DAY_DURATION,
+            k=2000,
+        )
+        return {d.destination_stop_id for d in deps}
+
+    def _compute_reachable_from_teams(self) -> set:
+        """Return the union of stations reachable from each team's current position."""
+        reachable: set = set()
+        for team in self.state.teams.values():
+            reachable |= self._compute_reachable(team.current_station)
+        return reachable
 
     # ------------------------------------------------------------------
     # Transit processing
@@ -227,6 +259,8 @@ class Simulation:
                 station, team, self._starting_station_id,
                 own_station_penalty=tcfg["own_station_penalty"],
                 enemy_station_penalty=tcfg["enemy_station_penalty"],
+                extra_chips=team.desired_extra_chips,
+                max_chips_per_station=self.config["game"].get("max_chips_per_station", 5),
             )
 
             team.current_station = stop_id
@@ -272,9 +306,11 @@ class Simulation:
         )
         self.state.challenges.remove(chal)
 
-        # Spawn new challenges
+        # Spawn new challenges at stations reachable from current team positions
+        # so the replacement challenges are always findable.
         chal_cfg = self.config["challenges"]
         n_spawn = 2 if len(self.state.challenges) < chal_cfg["spawn_threshold"] else 1
+        reachable = self._compute_reachable_from_teams()
         new_chals = spawn_challenges(
             self.state,
             self._starting_station_id,
@@ -282,6 +318,7 @@ class Simulation:
             steal_fraction=chal_cfg["steal_fraction"],
             steal_probability=chal_cfg["steal_probability"],
             count=n_spawn,
+            reachable_stations=reachable,
         )
         self.state.challenges.extend(new_chals)
 
@@ -369,7 +406,9 @@ class Simulation:
 
         # Check affordability (team may board if balance is negative already)
         cost = compute_route_chip_cost(
-            self.state.stations, valid_stops, team_id, self._starting_station_id
+            self.state.stations, valid_stops, team_id, self._starting_station_id,
+            extra_chips=team.desired_extra_chips,
+            max_chips_per_station=self.config["game"].get("max_chips_per_station", 5),
         )
         if team.coins > 0 and cost > team.coins:
             return [f"Team {team_id} cannot afford train to {self.state.stations.get(valid_stops[-1], type('', (), {'name': valid_stops[-1]})()).name!r} (cost={cost}, coins={team.coins})."]

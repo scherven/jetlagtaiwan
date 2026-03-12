@@ -95,6 +95,7 @@ class RailGameEnv(AECEnv):
         self.terminations = {a: False for a in self.agents}
         self.truncations = {a: False for a in self.agents}
         self.infos = {a: {} for a in self.agents}
+        self._prev_counts: dict = {"A": 0, "B": 0}
 
         self._decision_queue = []
         self._departures = {}
@@ -204,20 +205,35 @@ class RailGameEnv(AECEnv):
         K = self._K
         wall = sim_minute_to_wall_clock(self._sim.state.sim_minute)
         if action == K:
-            self._sim._attempt_challenge(team_id, wall)
+            # Only attempt challenge if the team is actually at a challenge station.
+            # If not, treat the action as a wait so the model can't spam no-op challenges.
+            team = self._sim.state.teams[team_id]
+            has_challenge = any(
+                c.station_id == team.current_station
+                for c in self._sim.state.challenges
+            )
+            if has_challenge:
+                self._sim._attempt_challenge(team_id, wall)
+            # else: silently treat as wait
         elif action == K + 1:
-            pass  # wait
+            pass  # explicit wait
         elif 0 <= action < len(departures):
             self._sim._board_train(team_id, departures[action], wall)
-        # else: invalid — noop per spec
+        # else: invalid action index — noop (wait)
 
     def _compute_step_reward(self, agent: str) -> float:
+        """Delta reward: only positive when the board state improves this step."""
         state = self._sim.state
         opp = "B" if agent == "A" else "A"
         sid = self._starting_station_id
-        our = count_controlled_stations(state, agent, sid)
-        opp_ctrl = count_controlled_stations(state, opp, sid)
-        return 0.01 * our - 0.01 * opp_ctrl
+        our_now = count_controlled_stations(state, agent, sid)
+        opp_now = count_controlled_stations(state, opp, sid)
+        delta_our = our_now - self._prev_counts.get(agent, 0)
+        delta_opp = opp_now - self._prev_counts.get(opp, 0)
+        self._prev_counts[agent] = our_now
+        self._prev_counts[opp] = opp_now
+        # Reward gaining stations; penalise opponent gaining stations.
+        return 0.1 * delta_our - 0.1 * delta_opp
 
     def _end_episode(self):
         state = self._sim.state
@@ -228,7 +244,8 @@ class RailGameEnv(AECEnv):
             opp = "B" if agent == "A" else "A"
             our = count_controlled_stations(state, agent, sid)
             opp_ctrl = count_controlled_stations(state, opp, sid)
-            terminal_r = (our - opp_ctrl) / total
+            # Scale terminal reward so it dominates the sum of step rewards.
+            terminal_r = 5.0 * (our - opp_ctrl) / total
             self.rewards[agent] = terminal_r
             self._cumulative_rewards[agent] += terminal_r
             self.terminations[agent] = True
@@ -305,6 +322,7 @@ class RailGameParallelEnv(ParallelEnv):
         self.agents = list(self.possible_agents)
         self._decision_queue = []
         self._departures = {}
+        self._prev_counts: dict = {"A": 0, "B": 0}
 
         self._advance_to_decision()
 
@@ -380,19 +398,31 @@ class RailGameParallelEnv(ParallelEnv):
         K = self._K
         wall = sim_minute_to_wall_clock(self._sim.state.sim_minute)
         if action == K:
-            self._sim._attempt_challenge(team_id, wall)
+            # Only attempt challenge if the team is actually at a challenge station.
+            team = self._sim.state.teams[team_id]
+            has_challenge = any(
+                c.station_id == team.current_station
+                for c in self._sim.state.challenges
+            )
+            if has_challenge:
+                self._sim._attempt_challenge(team_id, wall)
         elif action == K + 1:
-            pass  # wait
+            pass  # explicit wait
         elif 0 <= action < len(departures):
             self._sim._board_train(team_id, departures[action], wall)
 
     def _compute_step_reward(self, agent: str) -> float:
+        """Delta reward: rewards the change in board position, not absolute state."""
         state = self._sim.state
         opp = "B" if agent == "A" else "A"
         sid = self._starting_station_id
-        our = count_controlled_stations(state, agent, sid)
-        opp_ctrl = count_controlled_stations(state, opp, sid)
-        return 0.01 * our - 0.01 * opp_ctrl
+        our_now = count_controlled_stations(state, agent, sid)
+        opp_now = count_controlled_stations(state, opp, sid)
+        delta_our = our_now - self._prev_counts.get(agent, 0)
+        delta_opp = opp_now - self._prev_counts.get(opp, 0)
+        self._prev_counts[agent] = our_now
+        self._prev_counts[opp] = opp_now
+        return 0.1 * delta_our - 0.1 * delta_opp
 
     def _add_terminal_rewards(self, rewards: dict, terminations: dict):
         state = self._sim.state
@@ -402,7 +432,8 @@ class RailGameParallelEnv(ParallelEnv):
             opp = "B" if agent == "A" else "A"
             our = count_controlled_stations(state, agent, sid)
             opp_ctrl = count_controlled_stations(state, opp, sid)
-            rewards[agent] = rewards.get(agent, 0.0) + (our - opp_ctrl) / total
+            # Larger terminal signal that dominates the per-step delta rewards.
+            rewards[agent] = rewards.get(agent, 0.0) + 5.0 * (our - opp_ctrl) / total
             terminations[agent] = True
 
     def _observe(self, agent: str) -> np.ndarray:

@@ -22,27 +22,34 @@ def encode_observation(
     starting_station_id: str,
     k: int = 10,
     starting_coins: int = 50,
+    max_chips_per_station: int = 5,
 ) -> np.ndarray:
     """
     Encode the full observation vector for `team_id`.
 
     Vector layout (all float32):
-      N*3  station ownership  (1=we control, -1=opp controls, 0=neutral)
-      N*2  chip counts        (our chips, opp chips) normalised by max observed
-      N*2  challenge presence (bool) + current value (normalised)
-      1    our coin count     (normalised by starting_coins)
-      1    opp coin count
-      1    current sim time   (0-1)
-      1    current day        (0-1)
-      1    our current station index (normalised)
-      1    our destination station index (-1 if not in transit, else normalised)
-      1    our arrival time   (-1 or normalised sim minute)
-      1    opp current station index
-      1    opp destination station index
-      1    opp arrival time
-      K*4  departures: dest_idx, dep_time, duration, route_cost  (all normalised)
+      N*5  per-station features:
+             ownership  (1=we control, -1=opp controls, 0=neutral)
+             our chips  (normalised by max observed, 0‥1)
+             opp chips  (normalised by max observed, 0‥1)
+             challenge present  (bool)
+             challenge value    (normalised by max challenge value)
+      12   scalar features:
+             our coins       (normalised by starting_coins)
+             opp coins       (normalised by starting_coins)
+             sim time        (0-1 over all days)
+             day             (0-1)
+             our station idx (normalised)
+             our dest idx    (-1 or normalised)
+             our arrival     (-1 or normalised)
+             opp station idx (normalised)
+             opp dest idx    (-1 or normalised)
+             opp arrival     (-1 or normalised)
+             is_challenge_here  (1.0 if our current station has a challenge)
+             n_valid_departures (normalised count of actual available departures, 0‥1)
+      K*4  departure slots: dest_idx, dep_time, duration, route_cost  (all normalised)
 
-    Total: N*7 + 10 + K*4
+    Total: N*5 + 12 + K*4
     """
     opponent_id = "B" if team_id == "A" else "A"
     us = game_state.teams[team_id]
@@ -90,12 +97,15 @@ def encode_observation(
             chal_value[i]   = challenge_map[s.id] / max_chal_val
 
     total_days = 5  # spec default; passed in via num_days param if needed
-    us_coins = us.coins
-    if us_coins < 0:
-        us_coins *= 100
+    us_coins = max(us.coins, 0)   # clamp negatives to 0 for normalisation
+    is_challenge_here = 1.0 if any(
+        c.station_id == us.current_station for c in game_state.challenges
+    ) else 0.0
+    n_valid_departures = min(len(departures), k) / max(k, 1)
+
     scalar = np.array([
-        us_coins  / starting_coins,
-        opp.coins / starting_coins,
+        us_coins  / max(starting_coins, 1),
+        max(opp.coins, 0) / max(starting_coins, 1),
         game_state.sim_minute / (DAY_DURATION * total_days),
         (game_state.day - 1) / (total_days - 1) if total_days > 1 else 0.0,
         station_index.get(us.current_station,  0) / max(N - 1, 1),
@@ -108,6 +118,8 @@ def encode_observation(
             if opp.destination_station else -1.0,
         (opp.arrival_time / (DAY_DURATION * total_days))
             if opp.arrival_time is not None else -1.0,
+        is_challenge_here,        # explicit flag: challenge waiting at current station
+        n_valid_departures,       # how full the departure menu is (0‥1)
     ], dtype=np.float32)
 
     # Departure slots
@@ -121,6 +133,7 @@ def encode_observation(
             dep.intermediate_stops,
             team_id,
             starting_station_id,
+            max_chips_per_station=max_chips_per_station,
         )
         dep_vec[j] = [
             dest_idx / max(N - 1, 1),
@@ -137,4 +150,4 @@ def encode_observation(
 
 
 def observation_size(n_stations: int, k: int = 10) -> int:
-    return n_stations * 5 + 10 + k * 4
+    return n_stations * 5 + 12 + k * 4
