@@ -36,7 +36,8 @@ simulation:
   clock_increment_minutes: 1
 
 agents:
-  max_departures_k: 30 # K in observation space
+  max_departures_k: 10  # K departure slots in observation (was 30; reduced for smaller obs)
+  c_max: 10             # challenge slots encoded in observation (C_MAX)
   heuristic_reachability_window: 120 # minutes ahead to scan for departures
   heuristic_extra_chips: 0  # extra chips placed above minimum on neutral/contested stops (0–4)
   heuristic_challenge_window: 180  # wider lookahead (minutes) used specifically to find challenge stations
@@ -44,7 +45,7 @@ agents:
   heuristic_low_coins_threshold: 15  # below this coin balance, prioritise challenges over expansion
 
 training:
-  algorithm: "PPO"
+  algorithm: "MaskablePPO"
   total_timesteps: 5_000_000
   learning_rate: 0.0003
   n_steps: 2048 # PPO rollout length

@@ -1,6 +1,21 @@
 """
 Observation encoding for the RL agent.
-Also provides route chip cost pre-computation used by both heuristic and RL agents.
+
+Vector layout (all float32):
+  14   scalars:
+         us_coins, opp_coins, sim_time, day,
+         us_station_idx, us_dest_idx, us_arrival,
+         opp_station_idx, opp_dest_idx, opp_arrival,
+         is_challenge_here, n_valid_departures,
+         our_controlled_fraction, opp_controlled_fraction
+  K*7  departure slots (0-padded for unused slots):
+         dest_idx, dep_time, duration, route_cost,
+         dest_ownership (-1/0/1), dest_our_chips, dest_opp_chips
+  C*5  challenge slots (0-padded):
+         station_idx, value, our_chips, opp_chips, is_reachable
+
+Total: 14 + K*7 + C_MAX*5
+  = 134 for K=10, C_MAX=10  (down from N*5+12+K*4 = 2612 with K=30, N=496)
 """
 
 from __future__ import annotations
@@ -8,10 +23,13 @@ from __future__ import annotations
 import numpy as np
 from typing import Dict, List
 
-from engine.game_state import GameState, Station
+from engine.game_state import GameState
 from engine.rail_network import Departure, RailNetwork
-from engine.rules import compute_route_chip_cost
-from engine.clock import DAY_DURATION, DAY_END_MINUTE, sim_minute_to_wall_clock
+from engine.rules import compute_route_chip_cost, count_controlled_stations
+from engine.clock import DAY_DURATION, DAY_END_MINUTE
+
+
+C_MAX_DEFAULT = 10  # max challenge slots encoded in the observation
 
 
 def encode_observation(
@@ -23,40 +41,15 @@ def encode_observation(
     k: int = 10,
     starting_coins: int = 50,
     max_chips_per_station: int = 5,
+    c_max: int = C_MAX_DEFAULT,
 ) -> np.ndarray:
-    """
-    Encode the full observation vector for `team_id`.
-
-    Vector layout (all float32):
-      N*5  per-station features:
-             ownership  (1=we control, -1=opp controls, 0=neutral)
-             our chips  (normalised by max observed, 0‥1)
-             opp chips  (normalised by max observed, 0‥1)
-             challenge present  (bool)
-             challenge value    (normalised by max challenge value)
-      12   scalar features:
-             our coins       (normalised by starting_coins)
-             opp coins       (normalised by starting_coins)
-             sim time        (0-1 over all days)
-             day             (0-1)
-             our station idx (normalised)
-             our dest idx    (-1 or normalised)
-             our arrival     (-1 or normalised)
-             opp station idx (normalised)
-             opp dest idx    (-1 or normalised)
-             opp arrival     (-1 or normalised)
-             is_challenge_here  (1.0 if our current station has a challenge)
-             n_valid_departures (normalised count of actual available departures, 0‥1)
-      K*4  departure slots: dest_idx, dep_time, duration, route_cost  (all normalised)
-
-    Total: N*5 + 12 + K*4
-    """
+    """Encode the full observation vector for `team_id`."""
     opponent_id = "B" if team_id == "A" else "A"
-    us = game_state.teams[team_id]
+    us  = game_state.teams[team_id]
     opp = game_state.teams[opponent_id]
 
-    station_list = game_state.station_list()
-    N = len(station_list)
+    station_list  = game_state.station_list()
+    N             = len(station_list)
     station_index = {s.id: i for i, s in enumerate(station_list)}
 
     chip_attr_us  = f"chips_team_{team_id.lower()}"
@@ -69,7 +62,7 @@ def encode_observation(
     )
     max_chips = max(max_chips, 1)
 
-    # Challenge lookup: station_id → challenge value
+    # Challenge lookup: station_id → current value
     challenge_map: Dict[str, float] = {}
     max_chal_val = 1.0
     for c in game_state.challenges:
@@ -77,57 +70,50 @@ def encode_observation(
         challenge_map[c.station_id] = v
         max_chal_val = max(max_chal_val, v)
 
-    ownership = np.zeros(N, dtype=np.float32)
-    our_chips  = np.zeros(N, dtype=np.float32)
-    opp_chips  = np.zeros(N, dtype=np.float32)
-    chal_present = np.zeros(N, dtype=np.float32)
-    chal_value   = np.zeros(N, dtype=np.float32)
+    # Reachable destinations (for challenge reachability flag)
+    reachable_dests = {dep.destination_stop_id for dep in departures[:k]}
 
-    for i, s in enumerate(station_list):
-        uc = getattr(s, chip_attr_us)
-        oc = getattr(s, chip_attr_opp)
-        if uc > oc:
-            ownership[i] = 1.0
-        elif oc > uc:
-            ownership[i] = -1.0
-        our_chips[i]  = uc / max_chips
-        opp_chips[i]  = oc / max_chips
-        if s.id in challenge_map:
-            chal_present[i] = 1.0
-            chal_value[i]   = challenge_map[s.id] / max_chal_val
+    # Global board control
+    our_count = count_controlled_stations(game_state, team_id,    starting_station_id)
+    opp_count = count_controlled_stations(game_state, opponent_id, starting_station_id)
+    total_stations = max(N - 1, 1)  # exclude starting station
 
-    total_days = 5  # spec default; passed in via num_days param if needed
-    us_coins = max(us.coins, 0)   # clamp negatives to 0 for normalisation
-    is_challenge_here = 1.0 if any(
-        c.station_id == us.current_station for c in game_state.challenges
-    ) else 0.0
-    n_valid_departures = min(len(departures), k) / max(k, 1)
+    # ── Scalars (14) ──────────────────────────────────────────────────────────
+    total_days   = 5
+    us_coins     = max(us.coins, 0)
+    is_ch_here   = 1.0 if any(c.station_id == us.current_station
+                               for c in game_state.challenges) else 0.0
+    n_valid      = min(len(departures), k)
 
     scalar = np.array([
-        us_coins  / max(starting_coins, 1),
+        us_coins / max(starting_coins, 1),
         max(opp.coins, 0) / max(starting_coins, 1),
-        game_state.sim_minute / (DAY_DURATION * total_days),
-        (game_state.day - 1) / (total_days - 1) if total_days > 1 else 0.0,
+        game_state.sim_minute / max(DAY_DURATION * total_days, 1),
+        (game_state.day - 1) / max(total_days - 1, 1),
         station_index.get(us.current_station,  0) / max(N - 1, 1),
-        (station_index.get(us.destination_station,  -1) / max(N - 1, 1))
+        (station_index.get(us.destination_station, -1) / max(N - 1, 1))
             if us.destination_station else -1.0,
-        (us.arrival_time / (DAY_DURATION * total_days))
+        (us.arrival_time / max(DAY_DURATION * total_days, 1))
             if us.arrival_time is not None else -1.0,
         station_index.get(opp.current_station, 0) / max(N - 1, 1),
         (station_index.get(opp.destination_station, -1) / max(N - 1, 1))
             if opp.destination_station else -1.0,
-        (opp.arrival_time / (DAY_DURATION * total_days))
+        (opp.arrival_time / max(DAY_DURATION * total_days, 1))
             if opp.arrival_time is not None else -1.0,
-        is_challenge_here,        # explicit flag: challenge waiting at current station
-        n_valid_departures,       # how full the departure menu is (0‥1)
+        is_ch_here,
+        n_valid / max(k, 1),
+        our_count / total_stations,
+        opp_count / total_stations,
     ], dtype=np.float32)
 
-    # Departure slots
-    dep_vec = np.zeros((k, 4), dtype=np.float32)
-    max_duration = DAY_DURATION
+    # ── Departure slots (K × 7) ───────────────────────────────────────────────
+    dep_vec = np.zeros((k, 7), dtype=np.float32)
     for j, dep in enumerate(departures[:k]):
-        dest_idx = station_index.get(dep.destination_stop_id, 0)
-        duration = (dep.arrival_minutes[-1] - dep.departure_minute) if dep.arrival_minutes else 0
+        dest_id      = dep.destination_stop_id
+        dest_idx     = station_index.get(dest_id, 0)
+        dest_station = game_state.stations.get(dest_id)
+        duration     = (dep.arrival_minutes[-1] - dep.departure_minute
+                        ) if dep.arrival_minutes else 0
         cost = compute_route_chip_cost(
             game_state.stations,
             dep.intermediate_stops,
@@ -135,19 +121,53 @@ def encode_observation(
             starting_station_id,
             max_chips_per_station=max_chips_per_station,
         )
+        if dest_station:
+            uc = getattr(dest_station, chip_attr_us)
+            oc = getattr(dest_station, chip_attr_opp)
+            dest_own = 1.0 if uc > oc else (-1.0 if oc > uc else 0.0)
+            dest_uc  = uc / max_chips
+            dest_oc  = oc / max_chips
+        else:
+            dest_own = dest_uc = dest_oc = 0.0
+
         dep_vec[j] = [
             dest_idx / max(N - 1, 1),
-            dep.departure_minute / (DAY_END_MINUTE + 1),
-            duration / max(max_duration, 1),
+            dep.departure_minute / max(DAY_END_MINUTE + 1, 1),
+            duration / max(DAY_DURATION, 1),
             cost / max(starting_coins, 1),
+            dest_own,
+            dest_uc,
+            dest_oc,
         ]
 
-    return np.concatenate([
-        ownership, our_chips, opp_chips, chal_present, chal_value,
-        scalar,
-        dep_vec.flatten(),
-    ])
+    # ── Challenge slots (C_MAX × 5) ──────────────────────────────────────────
+    chal_vec = np.zeros((c_max, 5), dtype=np.float32)
+    for j, c in enumerate(game_state.challenges[:c_max]):
+        chal_station = game_state.stations.get(c.station_id)
+        sidx         = station_index.get(c.station_id, 0)
+        val          = c.current_value() / max_chal_val
+        if chal_station:
+            uc = getattr(chal_station, chip_attr_us)
+            oc = getattr(chal_station, chip_attr_opp)
+        else:
+            uc = oc = 0
+        is_reachable = 1.0 if c.station_id in reachable_dests else 0.0
+        chal_vec[j] = [
+            sidx / max(N - 1, 1),
+            val,
+            uc / max_chips,
+            oc / max_chips,
+            is_reachable,
+        ]
+
+    return np.concatenate([scalar, dep_vec.flatten(), chal_vec.flatten()])
 
 
-def observation_size(n_stations: int, k: int = 10) -> int:
-    return n_stations * 5 + 12 + k * 4
+def observation_size(n_stations: int = 0, k: int = 10,
+                     c_max: int = C_MAX_DEFAULT) -> int:
+    """Return flat observation vector length.
+
+    n_stations is accepted for API compatibility but is no longer used —
+    the new encoding is independent of the total number of stations.
+    """
+    return 14 + k * 7 + c_max * 5
