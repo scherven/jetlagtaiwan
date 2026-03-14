@@ -94,7 +94,9 @@ class RailGameEnv(AECEnv):
         self.terminations        = {a: False for a in self.agents}
         self.truncations         = {a: False for a in self.agents}
         self.infos               = {a: {}    for a in self.agents}
-        self._prev_counts: dict  = {"A": 0, "B": 0}
+        self._prev_counts: dict      = {"A": 0, "B": 0}
+        self._prev_counts_snap: dict = {"A": 0, "B": 0}
+        self._challenge_bonus: dict  = {}
 
         self._decision_queue = []
         self._departures     = {}
@@ -114,9 +116,16 @@ class RailGameEnv(AECEnv):
         self._clear_rewards()
 
         departures = self._departures.get(agent, [])
+        # Snapshot counts before applying the action so the reward delta is
+        # computed relative to the state *before* this decision.
+        self._prev_counts_snap = dict(self._prev_counts)
         self._apply_action(agent, action, departures)
 
         self.rewards[agent] = self._compute_step_reward(agent)
+        # Keep _prev_counts up-to-date with current reality.
+        sid = self._starting_station_id
+        self._prev_counts["A"] = count_controlled_stations(self._sim.state, "A", sid)
+        self._prev_counts["B"] = count_controlled_stations(self._sim.state, "B", sid)
         self._accumulate_rewards()
 
         self._decision_queue = [a for a in self._decision_queue if a != agent]
@@ -223,12 +232,17 @@ class RailGameEnv(AECEnv):
         wall = sim_minute_to_wall_clock(self._sim.state.sim_minute)
         if action == K:
             team = self._sim.state.teams[team_id]
-            has_challenge = any(
-                c.station_id == team.current_station
-                for c in self._sim.state.challenges
+            ch = next(
+                (c for c in self._sim.state.challenges
+                 if c.station_id == team.current_station),
+                None,
             )
-            if has_challenge:
+            if ch is not None:
                 self._sim._attempt_challenge(team_id, wall)
+                # Small bonus for initiating a challenge (+0.005 per spec).
+                self._challenge_bonus[team_id] = (
+                    self._challenge_bonus.get(team_id, 0.0) + 0.005
+                )
         elif action == K + 1:
             pass   # explicit wait
         elif 0 <= action < len(departures):
@@ -241,11 +255,13 @@ class RailGameEnv(AECEnv):
         sid   = self._starting_station_id
         our_now = count_controlled_stations(state, agent, sid)
         opp_now = count_controlled_stations(state, opp,   sid)
-        delta_our = our_now - self._prev_counts.get(agent, 0)
-        delta_opp = opp_now - self._prev_counts.get(opp,   0)
-        self._prev_counts[agent] = our_now
-        self._prev_counts[opp]   = opp_now
-        return 0.1 * delta_our - 0.1 * delta_opp
+        # Read deltas using the snapshot taken before any agent's reward was
+        # computed this step (set by the caller via _snapshot_prev_counts).
+        delta_our = our_now - self._prev_counts_snap.get(agent, 0)
+        delta_opp = opp_now - self._prev_counts_snap.get(opp,   0)
+        # Accumulate completed-challenge bonus if flagged by _apply_action.
+        ch_bonus = self._challenge_bonus.pop(agent, 0.0)
+        return 0.1 * delta_our - 0.1 * delta_opp + ch_bonus
 
     def _end_episode(self):
         state = self._sim.state
@@ -255,7 +271,8 @@ class RailGameEnv(AECEnv):
             opp     = "B" if agent == "A" else "A"
             our     = count_controlled_stations(state, agent, sid)
             opp_ctrl = count_controlled_stations(state, opp,  sid)
-            terminal_r = 5.0 * (our - opp_ctrl) / total
+            # Scale: ±1.0 for a clean sweep, ±0 for a draw.
+            terminal_r = 1.0 * (our - opp_ctrl) / total
             self.rewards[agent]              = terminal_r
             self._cumulative_rewards[agent] += terminal_r
             self.terminations[agent]         = True
@@ -333,10 +350,12 @@ class RailGameParallelEnv(ParallelEnv):
             np.random.seed(seed)
 
         self._init_sim()
-        self.agents          = list(self.possible_agents)
-        self._decision_queue = []
-        self._departures     = {}
-        self._prev_counts: dict = {"A": 0, "B": 0}
+        self.agents              = list(self.possible_agents)
+        self._decision_queue     = []
+        self._departures         = {}
+        self._prev_counts: dict      = {"A": 0, "B": 0}
+        self._prev_counts_snap: dict = {"A": 0, "B": 0}
+        self._challenge_bonus: dict  = {}
 
         self._advance_to_decision()
 
@@ -345,11 +364,21 @@ class RailGameParallelEnv(ParallelEnv):
         return obs, infos
 
     def step(self, actions):
+        # Snapshot counts before applying any actions so every agent's reward
+        # delta is computed against the same pre-step baseline (fixes race).
+        sid = self._starting_station_id
+        self._prev_counts_snap = {
+            a: count_controlled_stations(self._sim.state, a, sid)
+            for a in self.possible_agents
+        }
         for agent in self._decision_queue:
             action = actions.get(agent, self._K + 1)
             self._apply_action(agent, action, self._departures.get(agent, []))
 
         rewards = {a: self._compute_step_reward(a) for a in self.possible_agents}
+        # Refresh prev_counts after rewards are computed.
+        for a in self.possible_agents:
+            self._prev_counts[a] = count_controlled_stations(self._sim.state, a, sid)
 
         self._decision_queue = []
         self._departures     = {}
@@ -439,12 +468,16 @@ class RailGameParallelEnv(ParallelEnv):
         wall = sim_minute_to_wall_clock(self._sim.state.sim_minute)
         if action == K:
             team = self._sim.state.teams[team_id]
-            has_challenge = any(
-                c.station_id == team.current_station
-                for c in self._sim.state.challenges
+            ch = next(
+                (c for c in self._sim.state.challenges
+                 if c.station_id == team.current_station),
+                None,
             )
-            if has_challenge:
+            if ch is not None:
                 self._sim._attempt_challenge(team_id, wall)
+                self._challenge_bonus[team_id] = (
+                    self._challenge_bonus.get(team_id, 0.0) + 0.005
+                )
         elif action == K + 1:
             pass
         elif 0 <= action < len(departures):
@@ -456,11 +489,11 @@ class RailGameParallelEnv(ParallelEnv):
         sid     = self._starting_station_id
         our_now = count_controlled_stations(state, agent, sid)
         opp_now = count_controlled_stations(state, opp,   sid)
-        delta_our = our_now - self._prev_counts.get(agent, 0)
-        delta_opp = opp_now - self._prev_counts.get(opp,   0)
-        self._prev_counts[agent] = our_now
-        self._prev_counts[opp]   = opp_now
-        return 0.1 * delta_our - 0.1 * delta_opp
+        # Use the pre-step snapshot so A and B see the same baseline.
+        delta_our = our_now - self._prev_counts_snap.get(agent, 0)
+        delta_opp = opp_now - self._prev_counts_snap.get(opp,   0)
+        ch_bonus  = self._challenge_bonus.pop(agent, 0.0)
+        return 0.1 * delta_our - 0.1 * delta_opp + ch_bonus
 
     def _add_terminal_rewards(self, rewards: dict, terminations: dict):
         state = self._sim.state
@@ -470,7 +503,8 @@ class RailGameParallelEnv(ParallelEnv):
             opp      = "B" if agent == "A" else "A"
             our      = count_controlled_stations(state, agent, sid)
             opp_ctrl = count_controlled_stations(state, opp,   sid)
-            rewards[agent] = rewards.get(agent, 0.0) + 5.0 * (our - opp_ctrl) / total
+            # Scale: ±1.0 for a clean sweep, ±0 for a draw.
+            rewards[agent] = rewards.get(agent, 0.0) + 1.0 * (our - opp_ctrl) / total
             terminations[agent] = True
 
     def _observe(self, agent: str) -> np.ndarray:

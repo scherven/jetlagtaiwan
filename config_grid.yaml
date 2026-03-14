@@ -1,0 +1,58 @@
+network:
+  type: "grid"                  # use GridNetwork instead of GTFS
+  grid_rows: 10
+  grid_cols: 10
+  grid_interval_minutes: 5     # departure frequency per edge
+  grid_travel_time: 5          # minutes per hop between neighbours
+
+game:
+  starting_coins: 50
+  daily_stipend: 20
+  starting_station: "R04C04"   # centre of the 10x10 grid
+  num_days: 5
+  day_start: "07:30"
+  day_end: "17:30"
+  max_chips_per_station: 5
+
+travel:
+  min_chips_per_stop: 1
+  own_station_penalty: 1
+  enemy_station_penalty: 3
+
+challenges:
+  initial_count: 3
+  spawn_threshold: 10
+  chip_gain_base: 50
+  steal_fraction: 0.20
+  steal_probability: 0.25
+  daily_multiplier: 1.10
+  completion_time_minutes: 30
+
+simulation:
+  speed_options: [1, 5, 20, 100, 1000, 10000, 100000]
+  clock_increment_minutes: 1
+
+agents:
+  max_departures_k: 10
+  c_max: 10
+  heuristic_reachability_window: 60   # minutes; grid is small so 60 is plenty
+  heuristic_extra_chips: 0
+  heuristic_challenge_window: 120
+  heuristic_challenge_k: 20
+  heuristic_low_coins_threshold: 15
+
+training:
+  algorithm: "MaskablePPO"
+  total_timesteps: 2_000_000          # grid trains much faster
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  clip_range: 0.2
+  opponent_swap_interval: 50
+  eval_interval: 200
+  eval_episodes: 20
+  win_rate_target: 0.70
+  log_file: "training_log_grid.csv"
+  snapshot_dir: "checkpoints_grid/"

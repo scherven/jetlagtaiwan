@@ -43,6 +43,10 @@ class HeuristicAgent:
         # action is chosen (steps 3-6).
         self._last_departed_from: Optional[str] = None
 
+    def reset(self) -> None:
+        """Clear per-episode state.  Call between games when reusing an instance."""
+        self._last_departed_from = None
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------

@@ -2,15 +2,26 @@
 Entry point for the Rail Strategy Game — Phase 1.
 
 Usage:
-    python main.py                                 # heuristic vs heuristic
-    python main.py --model-a checkpoints/best_model.zip          # RL agent as A
-    python main.py --model-a X.zip --model-b Y.zip               # RL vs RL
-    python main.py --headless                      # no display (fast)
-    python main.py --speed 100                     # faster UI
+    python main.py                                    # heuristic vs heuristic
+    python main.py --agent-a minimax                  # minimax as A
+    python main.py --agent-a minimax --minimax-depth 3
+    python main.py --agent-a rl:checkpoints/best.zip  # RL model as A
+    python main.py --agent-a rl:X.zip --agent-b rl:Y.zip
+    python main.py --config config_grid.yaml --headless
+    python main.py --speed 100
 
-Agent flags:
-    --model-a PATH   Load a trained SB3 model as Team A (default: heuristic)
-    --model-b PATH   Load a trained SB3 model as Team B (default: heuristic)
+Agent flags (--agent-a / --agent-b):
+    heuristic          Greedy rule-based agent (default)
+    minimax            Minimax agent (depth from --minimax-depth)
+    rl:PATH            Load a trained SB3/MaskablePPO model from PATH
+
+Minimax tuning:
+    --minimax-depth N  Search depth (default: 2; depth 1 = one-step lookahead)
+    --minimax-branch N Max departures considered per node (default: 5)
+
+Backwards compatibility:
+    --model-a PATH     Equivalent to --agent-a rl:PATH
+    --model-b PATH     Equivalent to --agent-b rl:PATH
 """
 
 from __future__ import annotations
@@ -23,11 +34,10 @@ import time
 import numpy as np
 import pygame
 import yaml
-from sb3_contrib import MaskablePPO
-from stable_baselines3 import PPO
 
 from agents.eval import encode_observation, C_MAX_DEFAULT
 from agents.heuristic import HeuristicAgent
+from agents.minimax import MinimaxAgent
 from engine.rail_network import RailNetwork
 from engine.simulation import Simulation
 from ui.display import Display
@@ -37,35 +47,23 @@ logging.basicConfig(
     format="%(levelname)s %(name)s: %(message)s",
 )
 
-def _load_rl_agent(model_path: str, team_label: str, config: dict):
-    """Load a MaskablePPO (or legacy PPO) model and return an agent callback."""
-    k              = config["agents"]["max_departures_k"]
-    c_max          = config["agents"].get("c_max", C_MAX_DEFAULT)
-    starting_coins = config["game"]["starting_coins"]
-    max_chips      = config["game"].get("max_chips_per_station", 5)
-
-    # Try MaskablePPO first; fall back to plain PPO for old checkpoints.
-    maskable = True
+def _make_rl_agent(model_path: str, team_label: str, config: dict):
+    """Load a trained MaskablePPO model and return an agent callback."""
     try:
+        from sb3_contrib import MaskablePPO
         model = MaskablePPO.load(model_path)
-    except Exception as e1:
-        try:
-            model = PPO.load(model_path)
-            maskable = False
-            print(f"  NOTE: {model_path} is a plain-PPO checkpoint (no action masking at inference).")
-        except Exception as e2:
-            print(f"  WARNING: could not load model for Team {team_label}: {e2}")
-            return None
+        k              = config["agents"]["max_departures_k"]
+        c_max          = config["agents"].get("c_max", C_MAX_DEFAULT)
+        starting_coins = config["game"]["starting_coins"]
+        max_chips      = config["game"].get("max_chips_per_station", 5)
+        print(f"  Loaded RL model for Team {team_label}: {model_path}")
 
-    print(f"  Loaded {'MaskablePPO' if maskable else 'PPO'} model for Team {team_label}: {model_path} (k={k}, c_max={c_max})")
-
-    def agent_fn(state, rail_network, team_id, departures):
-        obs = encode_observation(
-            state, rail_network, team_id, departures,
-            _STARTING_ID, k=k, starting_coins=starting_coins,
-            max_chips_per_station=max_chips, c_max=c_max,
-        )
-        if maskable:
+        def agent_fn(state, rail_network, team_id, departures):
+            obs = encode_observation(
+                state, rail_network, team_id, departures,
+                _STARTING_ID, k=k, starting_coins=starting_coins,
+                max_chips_per_station=max_chips, c_max=c_max,
+            )
             mask = np.zeros(k + 2, dtype=bool)
             mask[:min(len(departures), k)] = True
             team = state.teams[team_id]
@@ -77,35 +75,101 @@ def _load_rl_agent(model_path: str, team_label: str, config: dict):
                 action_masks=mask.reshape(1, -1),
                 deterministic=True,
             )
-        else:
-            action, _ = model.predict(obs.reshape(1, -1), deterministic=True)
-        return int(action[0]) if hasattr(action, "__len__") else int(action)
+            return int(action[0]) if hasattr(action, "__len__") else int(action)
 
-    return agent_fn
+        return agent_fn
+    except Exception as e:
+        print(f"  WARNING: could not load RL model for Team {team_label}: {e}")
+        return None
+
+
+def _build_agent(spec: str, label: str, config: dict, starting_station_id: str,
+                 minimax_depth: int, minimax_branch: int):
+    """
+    Parse an agent spec string and return (agent_fn, display_label).
+
+    Spec formats:
+        "heuristic"      — HeuristicAgent
+        "minimax"        — MinimaxAgent (uses minimax_depth / minimax_branch)
+        "rl:PATH"        — MaskablePPO loaded from PATH
+        "PATH"           — treated as rl:PATH for backwards-compat (--model-a)
+    """
+    spec = spec.strip()
+
+    if spec == "heuristic":
+        agent = HeuristicAgent(config)
+        agent.starting_station_id = starting_station_id
+        return agent.choose_action, "Heuristic"
+
+    if spec == "minimax":
+        agent = MinimaxAgent(config, depth=minimax_depth, branch_factor=minimax_branch)
+        agent.starting_station_id = starting_station_id
+        return agent.choose_action, f"Minimax(depth={minimax_depth})"
+
+    # "rl:PATH" or bare "PATH"
+    model_path = spec[3:] if spec.startswith("rl:") else spec
+    fn = _make_rl_agent(model_path, label, config)
+    if fn is not None:
+        return fn, f"RL({model_path})"
+    # Fall back to heuristic if model load failed
+    agent = HeuristicAgent(config)
+    agent.starting_station_id = starting_station_id
+    return agent.choose_action, "Heuristic(fallback)"
+
 
 _STARTING_ID = None   # set after network load so the RL closure can reference it
 
 def main():
     parser = argparse.ArgumentParser(description="Rail Strategy Game")
+    parser.add_argument("--config", type=str, default="config.yaml",
+                        help="Config file (default: config.yaml; use config_grid.yaml for grid)")
     parser.add_argument("--headless", action="store_true", help="Run without UI")
     parser.add_argument("--speed", type=float, default=20.0, help="Simulation speed multiplier")
-    parser.add_argument("--model-a", type=str, default=None, help="Path to trained SB3 model for Team A")
-    parser.add_argument("--model-b", type=str, default=None, help="Path to trained SB3 model for Team B")
+    parser.add_argument("--agent-a", type=str, default="heuristic",
+                        help="Team A agent: heuristic | minimax | rl:PATH")
+    parser.add_argument("--agent-b", type=str, default="heuristic",
+                        help="Team B agent: heuristic | minimax | rl:PATH")
+    parser.add_argument("--minimax-depth", type=int, default=2,
+                        help="Search depth for minimax agents (default: 2)")
+    parser.add_argument("--minimax-branch", type=int, default=5,
+                        help="Branching factor for minimax agents (default: 5)")
+    # Backwards-compat shims: --model-a/b PATH ≡ --agent-a/b rl:PATH
+    parser.add_argument("--model-a", type=str, default=None,
+                        help="(deprecated) Path to RL model for Team A; use --agent-a rl:PATH")
+    parser.add_argument("--model-b", type=str, default=None,
+                        help="(deprecated) Path to RL model for Team B; use --agent-b rl:PATH")
     args = parser.parse_args()
+
+    # Honour legacy --model-a/b flags by overriding --agent-a/b
+    if args.model_a:
+        args.agent_a = f"rl:{args.model_a}"
+    if args.model_b:
+        args.agent_b = f"rl:{args.model_b}"
 
     # ------------------------------------------------------------------ #
     # Load config
     # ------------------------------------------------------------------ #
-    with open("config.yaml") as f:
+    with open(args.config) as f:
         config = yaml.safe_load(f)
 
     # ------------------------------------------------------------------ #
     # Build rail network
     # ------------------------------------------------------------------ #
     print("Loading rail network...")
-    feed_dirs = config["network"]["feeds"]
-    merge_strategy = config["network"].get("merge_strategy", "parent")
-    net = RailNetwork(feed_dirs, merge_strategy=merge_strategy)
+    net_cfg = config["network"]
+    if net_cfg.get("type") == "grid":
+        from engine.grid_network import GridNetwork
+        net = GridNetwork(
+            rows=net_cfg.get("grid_rows", 10),
+            cols=net_cfg.get("grid_cols", 10),
+            interval_minutes=net_cfg.get("grid_interval_minutes", 5),
+            travel_time=net_cfg.get("grid_travel_time", 5),
+        )
+    else:
+        net = RailNetwork(
+            net_cfg["feeds"],
+            merge_strategy=net_cfg.get("merge_strategy", "parent"),
+        )
     print(f"  {len(net.stations)} stations, "
           f"{sum(len(v) for v in net.schedules.values())} schedule entries")
 
@@ -124,26 +188,14 @@ def main():
     global _STARTING_ID
     _STARTING_ID = starting_station_id
 
-    heuristic_a = HeuristicAgent(config)
-    heuristic_a.starting_station_id = starting_station_id
-    heuristic_b = HeuristicAgent(config)
-    heuristic_b.starting_station_id = starting_station_id
-
-    rl_a = _load_rl_agent(args.model_a, "A", config) if args.model_a else None
-    rl_b = _load_rl_agent(args.model_b, "B", config) if args.model_b else None
-
-    def agent_a(state, rail_network, team_id, departures):
-        if rl_a:
-            return rl_a(state, rail_network, team_id, departures)
-        return heuristic_a.choose_action(state, rail_network, team_id, departures)
-
-    def agent_b(state, rail_network, team_id, departures):
-        if rl_b:
-            return rl_b(state, rail_network, team_id, departures)
-        return heuristic_b.choose_action(state, rail_network, team_id, departures)
-
-    a_label = f"RL ({args.model_a})" if rl_a else "Heuristic"
-    b_label = f"RL ({args.model_b})" if rl_b else "Heuristic"
+    agent_a, a_label = _build_agent(
+        args.agent_a, "A", config, starting_station_id,
+        args.minimax_depth, args.minimax_branch,
+    )
+    agent_b, b_label = _build_agent(
+        args.agent_b, "B", config, starting_station_id,
+        args.minimax_depth, args.minimax_branch,
+    )
     print(f"  Team A: {a_label}")
     print(f"  Team B: {b_label}")
 

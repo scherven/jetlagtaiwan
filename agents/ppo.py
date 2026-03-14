@@ -265,6 +265,13 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
     steps_per_block = max(eval_interval * 20, tcfg["n_steps"])
     t0             = time.time()
 
+    # Save an initial snapshot so the opponent pool is non-empty from episode 0.
+    # This lets the env_wrapper (or any self-play wrapper) always have a frozen
+    # opponent to play against, even before the first scheduled swap.
+    initial_snap = snapshot_dir / "snapshot_ep0.zip"
+    model.save(str(initial_snap))
+    snapshots: List[Path] = [initial_snap]
+
     print("Starting training...\n")
 
     while model.num_timesteps < total_timesteps:
@@ -272,17 +279,18 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
             total_timesteps=steps_per_block,
             reset_num_timesteps=False,
             progress_bar=False,
-            use_masking=True,        # ← enable action masking during rollout
+            use_masking=True,
         )
 
         episodes_done += eval_interval   # approximate
 
-        # Periodic opponent snapshot
+        # Periodic opponent snapshot — save and add to pool.
         if (episodes_done // opponent_swap_interval) > (
             (episodes_done - eval_interval) // opponent_swap_interval
         ):
             snap_path = snapshot_dir / f"snapshot_ep{episodes_done}.zip"
             model.save(str(snap_path))
+            snapshots.append(snap_path)
 
         win_rate = evaluate_vs_heuristic(model, config, rail_network,
                                          n_episodes=eval_episodes)
@@ -326,8 +334,11 @@ def evaluate_vs_heuristic(
     rail_network,
     n_episodes: int = 100,
 ) -> float:
-    """Run n_episodes with RL as Team A and heuristic as Team B.
-    Returns Team-A win fraction.  Uses a worker pool for speed.
+    """Run n_episodes: half with RL as A, half with RL as B.
+
+    Returns the RL win fraction across all episodes (ties count as 0.5).
+    Using both team assignments removes the A/B first-mover bias from
+    the win-rate estimate.
     """
     import multiprocessing as mp
 
@@ -336,20 +347,20 @@ def evaluate_vs_heuristic(
     model_bytes = buf.getvalue()
 
     n_workers = min(n_episodes, max(1, os.cpu_count() - 1))
-    args      = [(model_bytes, config, i) for i in range(n_episodes)]
-
-    feeds = config["network"]["feeds"]
-    merge = config["network"].get("merge_strategy", "parent")
+    # Alternate rl_is_a flag so exactly half play each side.
+    args = [(model_bytes, config, i, i % 2 == 0) for i in range(n_episodes)]
 
     with mp.Pool(
         processes=n_workers,
         initializer=_eval_worker_init,
-        initargs=(feeds, merge),
+        initargs=(config["network"],),
     ) as pool:
         results = pool.map(_eval_worker_run, args)
 
-    wins = sum(1 for r in results if r == "A")
-    return wins / n_episodes
+    # results[i] = ("win", "loss", "tie") from the RL agent's perspective
+    score = sum(1.0 if r == "win" else 0.5 if r == "tie" else 0.0
+                for r in results)
+    return score / n_episodes
 
 
 # ── Worker-process state ──────────────────────────────────────────────────────
@@ -357,37 +368,64 @@ def evaluate_vs_heuristic(
 _worker_rail_network = None
 
 
-def _eval_worker_init(feeds, merge_strategy):
+def _eval_worker_init(net_cfg: dict):
     """Load the rail network once per worker process."""
     global _worker_rail_network
-    from engine.rail_network import RailNetwork
-    _worker_rail_network = RailNetwork(feeds, merge_strategy=merge_strategy)
+    if net_cfg.get("type") == "grid":
+        from engine.grid_network import GridNetwork
+        _worker_rail_network = GridNetwork(
+            rows=net_cfg.get("grid_rows", 10),
+            cols=net_cfg.get("grid_cols", 10),
+            interval_minutes=net_cfg.get("grid_interval_minutes", 5),
+            travel_time=net_cfg.get("grid_travel_time", 5),
+        )
+    else:
+        from engine.rail_network import RailNetwork
+        _worker_rail_network = RailNetwork(
+            net_cfg["feeds"],
+            merge_strategy=net_cfg.get("merge_strategy", "parent"),
+        )
 
 
 def _eval_worker_run(args) -> str:
-    """Run one eval episode.  Returns 'A', 'B', or 'tie'."""
+    """Run one eval episode.
+    Returns 'win', 'loss', or 'tie' from the RL agent's perspective.
+    """
     from sb3_contrib import MaskablePPO
     from agents.heuristic import HeuristicAgent
 
-    model_bytes, config, _seed = args
+    model_bytes, config, _seed, rl_is_a = args
     model     = MaskablePPO.load(io.BytesIO(model_bytes))
     heuristic = HeuristicAgent(config)
-    return _run_one_episode(model, heuristic, config, _worker_rail_network)
+    return _run_one_episode(model, heuristic, config, _worker_rail_network,
+                            rl_is_a=rl_is_a)
 
 
-def _run_one_episode(model, heuristic, config: dict, rail_network) -> str:
+def _run_one_episode(
+    model,
+    heuristic,
+    config: dict,
+    rail_network,
+    rl_is_a: bool = True,
+) -> str:
     """
-    Run one game: RL model as A, heuristic as B.
-    Returns 'A', 'B', or 'tie'.
+    Run one game with RL on one side and heuristic on the other.
 
-    Action masks are computed from RailGameEnv.action_masks() and passed to
-    model.predict() so the RL agent never samples invalid actions.
+    rl_is_a=True  → RL plays Team A, heuristic plays Team B.
+    rl_is_a=False → heuristic plays Team A, RL plays Team B.
+
+    Returns 'win', 'loss', or 'tie' from the RL agent's perspective.
+    Action masks ensure the RL agent never samples invalid actions.
     """
     from engine.rules import count_controlled_stations
 
     env = RailGameEnv(config, rail_network)
     obs_dict, _ = env.reset()
     heuristic.starting_station_id = env._starting_station_id
+    heuristic.reset()   # clear anti-bounce state from any previous episode
+
+    rl_team  = "A" if rl_is_a else "B"
+    opp_team = "B" if rl_is_a else "A"
 
     done = False
     while not done:
@@ -398,9 +436,9 @@ def _run_one_episode(model, heuristic, config: dict, rail_network) -> str:
                     or all(env.truncations.values()))
             continue
 
-        if agent == "A":
+        if agent == rl_team:
             obs   = obs_dict.get(agent, env.observe(agent))
-            masks = env.action_masks()                        # (K+2,) bool
+            masks = env.action_masks()
             action, _ = model.predict(
                 obs.reshape(1, -1),
                 action_masks=masks.reshape(1, -1),
@@ -421,12 +459,16 @@ def _run_one_episode(model, heuristic, config: dict, rail_network) -> str:
 
     state = env._sim.state
     sid   = env._starting_station_id
-    a     = count_controlled_stations(state, "A", sid)
-    b     = count_controlled_stations(state, "B", sid)
-    if a > b:
-        return "A"
-    elif b > a:
-        return "B"
+    a_ct  = count_controlled_stations(state, "A", sid)
+    b_ct  = count_controlled_stations(state, "B", sid)
+
+    rl_ct  = a_ct if rl_is_a else b_ct
+    opp_ct = b_ct if rl_is_a else a_ct
+
+    if rl_ct > opp_ct:
+        return "win"
+    elif opp_ct > rl_ct:
+        return "loss"
     return "tie"
 
 
@@ -436,19 +478,31 @@ def _run_one_episode(model, heuristic, config: dict, rail_network) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Train RL agents for Rail Strategy Game")
+    parser.add_argument("--config", type=str, default="config.yaml",
+                        help="Config file (default: config.yaml)")
     parser.add_argument("--timesteps", type=int, default=None,
                         help="Override total_timesteps from config")
     args = parser.parse_args()
 
-    with open("config.yaml") as f:
+    with open(args.config) as f:
         config = yaml.safe_load(f)
 
-    from engine.rail_network import RailNetwork
     print("Loading rail network...")
-    net = RailNetwork(
-        config["network"]["feeds"],
-        config["network"].get("merge_strategy", "parent"),
-    )
+    net_cfg = config["network"]
+    if net_cfg.get("type") == "grid":
+        from engine.grid_network import GridNetwork
+        net = GridNetwork(
+            rows=net_cfg.get("grid_rows", 10),
+            cols=net_cfg.get("grid_cols", 10),
+            interval_minutes=net_cfg.get("grid_interval_minutes", 5),
+            travel_time=net_cfg.get("grid_travel_time", 5),
+        )
+    else:
+        from engine.rail_network import RailNetwork
+        net = RailNetwork(
+            net_cfg["feeds"],
+            merge_strategy=net_cfg.get("merge_strategy", "parent"),
+        )
     print(f"  {len(net.stations)} stations loaded\n")
 
     train(config, net, extra_timesteps=args.timesteps)
