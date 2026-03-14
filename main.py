@@ -24,6 +24,7 @@ import numpy as np
 import pygame
 import yaml
 from sb3_contrib import MaskablePPO
+from stable_baselines3 import PPO
 
 from agents.eval import encode_observation, C_MAX_DEFAULT
 from agents.heuristic import HeuristicAgent
@@ -37,39 +38,50 @@ logging.basicConfig(
 )
 
 def _load_rl_agent(model_path: str, team_label: str, config: dict):
-    """Load a trained MaskablePPO model and return an agent callback."""
+    """Load a MaskablePPO (or legacy PPO) model and return an agent callback."""
+    k              = config["agents"]["max_departures_k"]
+    c_max          = config["agents"].get("c_max", C_MAX_DEFAULT)
+    starting_coins = config["game"]["starting_coins"]
+    max_chips      = config["game"].get("max_chips_per_station", 5)
+
+    # Try MaskablePPO first; fall back to plain PPO for old checkpoints.
+    maskable = True
     try:
         model = MaskablePPO.load(model_path)
-        k             = config["agents"]["max_departures_k"]
-        c_max         = config["agents"].get("c_max", C_MAX_DEFAULT)
-        starting_coins = config["game"]["starting_coins"]
-        max_chips      = config["game"].get("max_chips_per_station", 5)
-        print(f"  Loaded RL model for Team {team_label}: {model_path} (k={k}, c_max={c_max})")
+    except Exception as e1:
+        try:
+            model = PPO.load(model_path)
+            maskable = False
+            print(f"  NOTE: {model_path} is a plain-PPO checkpoint (no action masking at inference).")
+        except Exception as e2:
+            print(f"  WARNING: could not load model for Team {team_label}: {e2}")
+            return None
 
-        def agent_fn(state, rail_network, team_id, departures):
-            obs = encode_observation(
-                state, rail_network, team_id, departures,
-                _STARTING_ID, k=k, starting_coins=starting_coins,
-                max_chips_per_station=max_chips, c_max=c_max,
-            )
-            # Build action mask so the model never picks an invalid departure slot
+    print(f"  Loaded {'MaskablePPO' if maskable else 'PPO'} model for Team {team_label}: {model_path} (k={k}, c_max={c_max})")
+
+    def agent_fn(state, rail_network, team_id, departures):
+        obs = encode_observation(
+            state, rail_network, team_id, departures,
+            _STARTING_ID, k=k, starting_coins=starting_coins,
+            max_chips_per_station=max_chips, c_max=c_max,
+        )
+        if maskable:
             mask = np.zeros(k + 2, dtype=bool)
             mask[:min(len(departures), k)] = True
             team = state.teams[team_id]
             mask[k]     = any(c.station_id == team.current_station
                               for c in state.challenges)
-            mask[k + 1] = True   # wait always valid
+            mask[k + 1] = True
             action, _ = model.predict(
                 obs.reshape(1, -1),
                 action_masks=mask.reshape(1, -1),
                 deterministic=True,
             )
-            return int(action[0]) if hasattr(action, "__len__") else int(action)
+        else:
+            action, _ = model.predict(obs.reshape(1, -1), deterministic=True)
+        return int(action[0]) if hasattr(action, "__len__") else int(action)
 
-        return agent_fn
-    except Exception as e:
-        print(f"  WARNING: could not load model for Team {team_label}: {e}")
-        return None
+    return agent_fn
 
 _STARTING_ID = None   # set after network load so the RL closure can reference it
 

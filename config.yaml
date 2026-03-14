@@ -10,12 +10,12 @@ network:
 
 game:
   starting_coins: 50
-  daily_stipend: 20          # coins given to each team at the start of each new day
+  daily_stipend: 20 # coins given to each team at the start of each new day
   starting_station: "Times Sq-42 St"
   num_days: 5
   day_start: "07:30"
   day_end: "17:30"
-  max_chips_per_station: 5   # hard cap: one team can hold at most this many chips at any stop
+  max_chips_per_station: 5 # hard cap: one team can hold at most this many chips at any stop
 
 travel:
   min_chips_per_stop: 1
@@ -36,13 +36,13 @@ simulation:
   clock_increment_minutes: 1
 
 agents:
-  max_departures_k: 10  # K departure slots in observation (was 30; reduced for smaller obs)
-  c_max: 10             # challenge slots encoded in observation (C_MAX)
+  max_departures_k: 10 # K departure slots in observation (was 30; reduced for smaller obs)
+  c_max: 10 # challenge slots encoded in observation (C_MAX)
   heuristic_reachability_window: 120 # minutes ahead to scan for departures
-  heuristic_extra_chips: 0  # extra chips placed above minimum on neutral/contested stops (0–4)
-  heuristic_challenge_window: 180  # wider lookahead (minutes) used specifically to find challenge stations
-  heuristic_challenge_k: 50        # number of departures to scan when searching for a challenge station
-  heuristic_low_coins_threshold: 15  # below this coin balance, prioritise challenges over expansion
+  heuristic_extra_chips: 0 # extra chips placed above minimum on neutral/contested stops (0–4)
+  heuristic_challenge_window: 180 # wider lookahead (minutes) used specifically to find challenge stations
+  heuristic_challenge_k: 50 # number of departures to scan when searching for a challenge station
+  heuristic_low_coins_threshold: 15 # below this coin balance, prioritise challenges over expansion
 
 training:
   algorithm: "MaskablePPO"
@@ -55,7 +55,7 @@ training:
   clip_range: 0.2
   opponent_swap_interval: 50 # episodes between opponent policy swaps
   eval_interval: 500 # episodes between heuristic evaluations
-  eval_episodes: 20  # games per evaluation (fast; increase once model improves)
-  win_rate_target: 0.70 # stop training when this is reached
+  eval_episodes: 50 # games per evaluation (fast; increase once model improves)
+  win_rate_target: 0.95 # stop training when this is reached
   log_file: "training_log.csv"
-  snapshot_dir: "checkpoints/"
+  snapshot_dir: "checkpointsnew/"
