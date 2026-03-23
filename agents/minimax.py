@@ -279,7 +279,7 @@ class MinimaxAgent:
                 if ctrl is None:
                     score += 2.0
                 elif ctrl == opp_id:
-                    score += 0.5
+                    score += 1.5
 
             if dep.destination_stop_id in ch_stations:
                 score += 3.0
@@ -373,8 +373,26 @@ class MinimaxAgent:
         list.  The rail network and config are never copied (they are
         read-only for the purposes of lookahead).
         """
-        new_stations = {sid: copy.copy(s) for sid, s in state.stations.items()}
-        new_teams = {tid: copy.copy(t) for tid, t in state.teams.items()}
+        # Directly construct Station/Team objects instead of copy.copy() —
+        # avoids the generic copy machinery (573k copy.copy calls per eval).
+        new_stations = {
+            sid: Station(
+                id=s.id, name=s.name, lat=s.lat, lon=s.lon,
+                chips_team_a=s.chips_team_a, chips_team_b=s.chips_team_b,
+            )
+            for sid, s in state.stations.items()
+        }
+        new_teams = {
+            tid: Team(
+                id=t.id, coins=t.coins,
+                current_station=t.current_station,
+                destination_station=t.destination_station,
+                arrival_time=t.arrival_time,
+                remaining_stops=list(t.remaining_stops),
+                desired_extra_chips=t.desired_extra_chips,
+            )
+            for tid, t in state.teams.items()
+        }
 
         return GameState(
             day=state.day,

@@ -47,7 +47,8 @@ training:
   learning_rate: 0.0003
   n_steps: 2048
   batch_size: 64
-  n_epochs: 10
+  n_epochs: 4
+  net_arch: [256, 256]
   gamma: 0.99
   clip_range: 0.2
   opponent_swap_interval: 50

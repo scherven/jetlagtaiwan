@@ -7,7 +7,7 @@ Usage:
 
 Training loop:
   1. Both agents share one MaskablePPO policy (self-play via supersuit).
-  2. Every `eval_interval` episodes, evaluate win rate vs the heuristic agent.
+  2. Every `eval_interval` episodes, evaluate win rate vs a MinimaxAgent.
   3. Log win rate to training_log.csv.
   4. Save a policy snapshot whenever a new win-rate high is reached.
   5. Stop when win rate exceeds win_rate_target over eval_episodes window.
@@ -220,7 +220,7 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
     print(f"Network  : {config['network']['feeds']}")
     print(f"Stations : {len(rail_network.stations)}")
     print(f"Total timesteps: {total_timesteps:,}")
-    print(f"Eval every {eval_interval} episodes vs heuristic")
+    print(f"Eval every {eval_interval} episodes vs minimax")
     print(f"Target win rate: {win_rate_target:.0%}\n")
 
     # ── Build vectorised self-play environment ────────────────────────────────
@@ -236,7 +236,7 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
     env = VecMonitor(env)
 
     # ── MaskablePPO model ─────────────────────────────────────────────────────
-    policy_kwargs = dict(net_arch=[512, 512, 256])
+    policy_kwargs = dict(net_arch=tcfg.get("net_arch", [512, 512, 256]))
 
     model = MaskablePPO(
         "MlpPolicy",
@@ -272,6 +272,52 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
     model.save(str(initial_snap))
     snapshots: List[Path] = [initial_snap]
 
+    from stable_baselines3.common.callbacks import BaseCallback
+
+    class _EpisodeTimingCallback(BaseCallback):
+        """Prints a line after every completed game with its actual duration.
+
+        VecMonitor fires one episode event per agent (2 per game) with
+        identical (l, t) values — we deduplicate by skipping repeats.
+        ep['t'] is cumulative wall-clock since VecMonitor was created, so
+        we compute duration as the delta from the previous episode's t.
+        We also mark PPO rollout+update blocks so they're clearly visible.
+        """
+        def __init__(self):
+            super().__init__()
+            self._ep = 0
+            self._last_t = 0.0          # cumulative t at last printed episode
+            self._last_seen: tuple = () # (l, t) of last episode — for dedup
+            self._rollout_t0 = 0.0
+
+        def _on_rollout_start(self) -> None:
+            self._rollout_t0 = time.time()
+
+        def _on_rollout_end(self) -> None:
+            update_start = time.time()
+            # This method is called just before the gradient update runs.
+            # We print after returning; the next _on_rollout_start marks the end.
+            # Store so we can print update duration at next rollout start.
+            self._update_t0 = update_start
+
+        def _on_step(self) -> bool:
+            for info in self.locals.get("infos", []):
+                ep = info.get("episode")
+                if ep is None:
+                    continue
+                key = (ep["l"], round(ep["t"], 3))
+                if key == self._last_seen:
+                    continue   # duplicate agent event for same game
+                self._last_seen = key
+                self._ep += 1
+                duration = ep["t"] - self._last_t
+                self._last_t = ep["t"]
+                print(f"  ep {self._ep:>5}  steps={ep['l']:>4}  "
+                      f"time={duration:.2f}s", flush=True)
+            return True
+
+    ep_callback = _EpisodeTimingCallback()
+
     print("Starting training...\n")
 
     while model.num_timesteps < total_timesteps:
@@ -280,6 +326,7 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
             reset_num_timesteps=False,
             progress_bar=False,
             use_masking=True,
+            callback=ep_callback,
         )
 
         episodes_done += eval_interval   # approximate
@@ -292,8 +339,8 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
             model.save(str(snap_path))
             snapshots.append(snap_path)
 
-        win_rate = evaluate_vs_heuristic(model, config, rail_network,
-                                         n_episodes=eval_episodes)
+        win_rate = evaluate_vs_minimax(model, config, rail_network,
+                                       n_episodes=eval_episodes)
         elapsed  = time.time() - t0
 
         print(
@@ -325,10 +372,10 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Evaluation vs heuristic
+# Evaluation vs minimax
 # ──────────────────────────────────────────────────────────────────────────────
 
-def evaluate_vs_heuristic(
+def evaluate_vs_minimax(
     model,
     config: dict,
     rail_network,
@@ -338,7 +385,8 @@ def evaluate_vs_heuristic(
 
     Returns the RL win fraction across all episodes (ties count as 0.5).
     Using both team assignments removes the A/B first-mover bias from
-    the win-rate estimate.
+    the win-rate estimate.  Opponent is a MinimaxAgent (depth 2) —
+    a stronger, less glitchy baseline than the heuristic.
     """
     import multiprocessing as mp
 
@@ -350,14 +398,31 @@ def evaluate_vs_heuristic(
     # Alternate rl_is_a flag so exactly half play each side.
     args = [(model_bytes, config, i, i % 2 == 0) for i in range(n_episodes)]
 
+    from tqdm import tqdm
+
+    wins = losses = ties = 0
+    results = []
     with mp.Pool(
         processes=n_workers,
         initializer=_eval_worker_init,
         initargs=(config["network"],),
     ) as pool:
-        results = pool.map(_eval_worker_run, args)
+        with tqdm(total=n_episodes, desc="Eval vs minimax", unit="ep",
+                  bar_format="{l_bar}{bar}| {n}/{total} [{elapsed}<{remaining}] W:{postfix[0]} L:{postfix[1]} T:{postfix[2]}",
+                  postfix=[0, 0, 0], leave=False) as pbar:
+            for result in pool.imap_unordered(_eval_worker_run, args):
+                results.append(result)
+                if result == "win":
+                    wins += 1
+                elif result == "loss":
+                    losses += 1
+                else:
+                    ties += 1
+                pbar.postfix[0] = wins
+                pbar.postfix[1] = losses
+                pbar.postfix[2] = ties
+                pbar.update()
 
-    # results[i] = ("win", "loss", "tie") from the RL agent's perspective
     score = sum(1.0 if r == "win" else 0.5 if r == "tie" else 0.0
                 for r in results)
     return score / n_episodes
@@ -366,6 +431,8 @@ def evaluate_vs_heuristic(
 # ── Worker-process state ──────────────────────────────────────────────────────
 
 _worker_rail_network = None
+_worker_model        = None   # cached deserialized model (reused across episodes)
+_worker_model_key    = None   # (len, suffix) fingerprint to detect model changes
 
 
 def _eval_worker_init(net_cfg: dict):
@@ -391,28 +458,37 @@ def _eval_worker_run(args) -> str:
     """Run one eval episode.
     Returns 'win', 'loss', or 'tie' from the RL agent's perspective.
     """
+    global _worker_model, _worker_model_key
     from sb3_contrib import MaskablePPO
-    from agents.heuristic import HeuristicAgent
+    from agents.minimax import MinimaxAgent
 
     model_bytes, config, _seed, rl_is_a = args
-    model     = MaskablePPO.load(io.BytesIO(model_bytes))
-    heuristic = HeuristicAgent(config)
-    return _run_one_episode(model, heuristic, config, _worker_rail_network,
+
+    # Cache the deserialized model in the worker process — all episodes in one
+    # eval round use the same weights, so deserializing 11 MB on every episode
+    # is pure waste.  Use (length, last-32-bytes) as a cheap change fingerprint.
+    key = (len(model_bytes), model_bytes[-32:])
+    if _worker_model is None or key != _worker_model_key:
+        _worker_model     = MaskablePPO.load(io.BytesIO(model_bytes))
+        _worker_model_key = key
+
+    opponent = MinimaxAgent(config, depth=2, branch_factor=5)
+    return _run_one_episode(_worker_model, opponent, config, _worker_rail_network,
                             rl_is_a=rl_is_a)
 
 
 def _run_one_episode(
     model,
-    heuristic,
+    opponent,
     config: dict,
     rail_network,
     rl_is_a: bool = True,
 ) -> str:
     """
-    Run one game with RL on one side and heuristic on the other.
+    Run one game with RL on one side and the opponent agent on the other.
 
-    rl_is_a=True  → RL plays Team A, heuristic plays Team B.
-    rl_is_a=False → heuristic plays Team A, RL plays Team B.
+    rl_is_a=True  → RL plays Team A, opponent plays Team B.
+    rl_is_a=False → opponent plays Team A, RL plays Team B.
 
     Returns 'win', 'loss', or 'tie' from the RL agent's perspective.
     Action masks ensure the RL agent never samples invalid actions.
@@ -421,8 +497,9 @@ def _run_one_episode(
 
     env = RailGameEnv(config, rail_network)
     obs_dict, _ = env.reset()
-    heuristic.starting_station_id = env._starting_station_id
-    heuristic.reset()   # clear anti-bounce state from any previous episode
+    opponent.starting_station_id = env._starting_station_id
+    if hasattr(opponent, "reset"):
+        opponent.reset()   # clear any per-episode state
 
     rl_team  = "A" if rl_is_a else "B"
     opp_team = "B" if rl_is_a else "A"
@@ -447,7 +524,7 @@ def _run_one_episode(
             action = int(action[0]) if hasattr(action, "__len__") else int(action)
         else:
             departures = env._departures.get(agent, [])
-            action     = heuristic.choose_action(
+            action     = opponent.choose_action(
                 env._sim.state, rail_network, agent, departures
             )
 

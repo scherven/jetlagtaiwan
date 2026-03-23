@@ -78,8 +78,12 @@ def encode_observation(
     station_list = list(game_state.stations.values())
     N = len(station_list)
 
-    # Lat/lon normalisation bounds
-    min_lat, max_lat, min_lon, max_lon = _latlon_bounds(game_state)
+    # Lat/lon normalisation bounds — use cached value from network if available
+    # (constant for the whole game) to avoid scanning all stations each call.
+    if hasattr(rail_network, 'latlon_bounds'):
+        min_lat, max_lat, min_lon, max_lon = rail_network.latlon_bounds
+    else:
+        min_lat, max_lat, min_lon, max_lon = _latlon_bounds(game_state)
 
     def nlat(lat: float) -> float:
         return _norm_lat(lat, min_lat, max_lat)
@@ -94,12 +98,9 @@ def encode_observation(
             return 0.5, 0.5
         return nlat(s.lat), nlon(s.lon)
 
-    # Max chips across all stations for chip-count normalisation
-    max_chips = max(
-        (max(getattr(s, chip_attr_us), getattr(s, chip_attr_opp)) for s in station_list),
-        default=1,
-    )
-    max_chips = max(max_chips, 1)
+    # Use config max as the normalisation ceiling — avoids scanning all stations
+    # on every call.  The actual max chips in play never exceeds this value.
+    max_chips = max(max_chips_per_station, 1)
 
     # Challenge value normalisation
     max_chal_val = max((c.current_value() for c in game_state.challenges), default=1.0)

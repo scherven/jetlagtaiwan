@@ -129,6 +129,8 @@ def main():
                         help="Team A agent: heuristic | minimax | rl:PATH")
     parser.add_argument("--agent-b", type=str, default="heuristic",
                         help="Team B agent: heuristic | minimax | rl:PATH")
+    parser.add_argument("--days", type=int, default=None,
+                        help="Limit simulation to this many days (overrides config)")
     parser.add_argument("--minimax-depth", type=int, default=2,
                         help="Search depth for minimax agents (default: 2)")
     parser.add_argument("--minimax-branch", type=int, default=5,
@@ -151,6 +153,9 @@ def main():
     # ------------------------------------------------------------------ #
     with open(args.config) as f:
         config = yaml.safe_load(f)
+
+    if args.days is not None:
+        config["game"]["num_days"] = args.days
 
     # ------------------------------------------------------------------ #
     # Build rail network
@@ -208,13 +213,80 @@ def main():
     # Headless mode
     # ------------------------------------------------------------------ #
     if args.headless:
+        from engine.rules import count_controlled_stations
+        from engine.clock import sim_minute_to_str
+
         print("\nRunning headless simulation...")
         t0 = time.time()
+
+        # Per-game stats
+        stats = {
+            "A": {"waits": 0, "boards": 0, "challenges": 0, "cant_afford": 0},
+            "B": {"waits": 0, "boards": 0, "challenges": 0, "cant_afford": 0},
+        }
+
+        MOVE_KEYWORDS = ("boarded", "arrived at", "completed journey",
+                         "started challenge", "cannot afford", "cancelled",
+                         "challenge but")
+
         for events in sim.run():
+            wall = sim_minute_to_str(sim.state.sim_minute)
             for e in events:
                 if e.startswith("==="):
                     print(e)
+                    # Print day snapshot on day boundaries
+                    if "ended" in e or "GAME OVER" in e:
+                        state = sim.state
+                        for tid in ("A", "B"):
+                            t = state.teams[tid]
+                            ctrl = count_controlled_stations(state, tid, starting_station_id)
+                            loc = state.stations[t.current_station].name if t.current_station in state.stations else t.current_station
+                            print(f"  Team {tid}: coins={t.coins:>4d}  controlled={ctrl:>3d}  at={loc!r}")
+                        print(f"  Active challenges: {len(state.challenges)}")
+                elif any(kw in e for kw in MOVE_KEYWORDS):
+                    print(f"  [{wall}] {e}")
+
+                # Tally action events
+                for tid in ("A", "B"):
+                    if f"Team {tid} boarded" in e:
+                        stats[tid]["boards"] += 1
+                    elif f"Team {tid} started challenge" in e:
+                        stats[tid]["challenges"] += 1
+                    elif f"Team {tid} cannot afford" in e:
+                        stats[tid]["cant_afford"] += 1
+
         elapsed = time.time() - t0
+
+        # Final action breakdown
+        print("\n--- Agent Action Summary ---")
+        for tid in ("A", "B"):
+            s = stats[tid]
+            total_active = s["boards"] + s["challenges"] + s["cant_afford"]
+            print(f"  Team {tid} ({a_label if tid == 'A' else b_label}):")
+            print(f"    Boards:      {s['boards']:>4d}")
+            print(f"    Challenges:  {s['challenges']:>4d}")
+            print(f"    Cant afford: {s['cant_afford']:>4d}")
+
+        # Final board state
+        state = sim.state
+        print("\n--- Final Board State ---")
+        for tid in ("A", "B"):
+            ctrl = count_controlled_stations(state, tid, starting_station_id)
+            t = state.teams[tid]
+            print(f"  Team {tid}: coins={t.coins}  controlled_stations={ctrl}")
+        # Top controlled stations per team
+        for tid in ("A", "B"):
+            opp = "B" if tid == "A" else "A"
+            chip_us  = f"chips_team_{tid.lower()}"
+            chip_opp = f"chips_team_{opp.lower()}"
+            contested = [(s.name, getattr(s, chip_us), getattr(s, chip_opp))
+                         for s in state.stations.values()
+                         if s.id != starting_station_id
+                         and getattr(s, chip_us) > 0 and getattr(s, chip_opp) > 0]
+            print(f"  Contested stations for {tid}: {len(contested)}")
+            for name, uc, oc in sorted(contested, key=lambda x: -(x[1]+x[2]))[:5]:
+                print(f"    {name}: us={uc} opp={oc}")
+
         print(f"\nDone in {elapsed:.2f}s")
         return
 

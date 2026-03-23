@@ -102,6 +102,14 @@ class RailNetwork:
         for sid in self.schedules:
             self.schedules[sid].sort(key=lambda d: d.departure_minute)
 
+        # Cache lat/lon bounds so encode_observation doesn't recompute per call
+        lats = [s.lat for s in self.stations.values()]
+        lons = [s.lon for s in self.stations.values()]
+        self.latlon_bounds = (
+            (min(lats), max(lats), min(lons), max(lons))
+            if lats else (0.0, 1.0, 0.0, 1.0)
+        )
+
         logger.info(
             "RailNetwork loaded: %d stations, %d schedule entries (strategy=%s)",
             len(self.stations),
