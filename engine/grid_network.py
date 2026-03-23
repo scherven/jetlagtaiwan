@@ -39,10 +39,6 @@ class GridNetwork:
         self.stations: Dict[str, StopNode] = {}
         self.schedules: Dict[str, List[Departure]] = defaultdict(list)
         self._build(interval_minutes, travel_time)
-        # Cache lat/lon bounds so encode_observation doesn't recompute per call
-        lats = [s.lat for s in self.stations.values()]
-        lons = [s.lon for s in self.stations.values()]
-        self.latlon_bounds = (min(lats), max(lats), min(lons), max(lons))
 
     # ------------------------------------------------------------------
     # Construction

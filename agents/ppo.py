@@ -7,7 +7,7 @@ Usage:
 
 Training loop:
   1. Both agents share one MaskablePPO policy (self-play via supersuit).
-  2. Every `eval_interval` episodes, evaluate win rate vs a MinimaxAgent.
+  2. Every `eval_interval` episodes, evaluate win rate vs the heuristic agent.
   3. Log win rate to training_log.csv.
   4. Save a policy snapshot whenever a new win-rate high is reached.
   5. Stop when win rate exceeds win_rate_target over eval_episodes window.
@@ -204,7 +204,35 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
 
     import supersuit as ss
     from sb3_contrib import MaskablePPO
+    from stable_baselines3.common.callbacks import BaseCallback
     from stable_baselines3.common.vec_env import VecMonitor
+
+    class _EpisodeTimingCallback(BaseCallback):
+        """Prints a one-line summary after each completed game episode."""
+
+        def __init__(self):
+            super().__init__()
+            self._ep        = 0
+            self._last_t    = 0.0
+            self._last_seen: tuple = ()
+
+        def _on_step(self) -> bool:
+            for info in self.locals.get("infos", []):
+                ep = info.get("episode")
+                if ep is None:
+                    continue
+                # VecMonitor fires once per agent (2×/game); deduplicate by
+                # (step_count, rounded wall time) which is identical for both.
+                key = (ep["l"], round(ep["t"], 3))
+                if key == self._last_seen:
+                    continue
+                self._last_seen = key
+                self._ep += 1
+                duration = ep["t"] - self._last_t
+                self._last_t = ep["t"]
+                print(f"  ep {self._ep:>5}  steps={ep['l']:>4}  time={duration:.2f}s",
+                      flush=True)
+            return True
 
     tcfg             = config["training"]
     total_timesteps  = extra_timesteps or tcfg["total_timesteps"]
@@ -236,7 +264,7 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
     env = VecMonitor(env)
 
     # ── MaskablePPO model ─────────────────────────────────────────────────────
-    policy_kwargs = dict(net_arch=tcfg.get("net_arch", [512, 512, 256]))
+    policy_kwargs = dict(net_arch=[512, 512, 256])
 
     model = MaskablePPO(
         "MlpPolicy",
@@ -272,55 +300,10 @@ def train(config: dict, rail_network, extra_timesteps: Optional[int] = None):
     model.save(str(initial_snap))
     snapshots: List[Path] = [initial_snap]
 
-    from stable_baselines3.common.callbacks import BaseCallback
-
-    class _EpisodeTimingCallback(BaseCallback):
-        """Prints a line after every completed game with its actual duration.
-
-        VecMonitor fires one episode event per agent (2 per game) with
-        identical (l, t) values — we deduplicate by skipping repeats.
-        ep['t'] is cumulative wall-clock since VecMonitor was created, so
-        we compute duration as the delta from the previous episode's t.
-        We also mark PPO rollout+update blocks so they're clearly visible.
-        """
-        def __init__(self):
-            super().__init__()
-            self._ep = 0
-            self._last_t = 0.0          # cumulative t at last printed episode
-            self._last_seen: tuple = () # (l, t) of last episode — for dedup
-            self._rollout_t0 = 0.0
-
-        def _on_rollout_start(self) -> None:
-            self._rollout_t0 = time.time()
-
-        def _on_rollout_end(self) -> None:
-            update_start = time.time()
-            # This method is called just before the gradient update runs.
-            # We print after returning; the next _on_rollout_start marks the end.
-            # Store so we can print update duration at next rollout start.
-            self._update_t0 = update_start
-
-        def _on_step(self) -> bool:
-            for info in self.locals.get("infos", []):
-                ep = info.get("episode")
-                if ep is None:
-                    continue
-                key = (ep["l"], round(ep["t"], 3))
-                if key == self._last_seen:
-                    continue   # duplicate agent event for same game
-                self._last_seen = key
-                self._ep += 1
-                duration = ep["t"] - self._last_t
-                self._last_t = ep["t"]
-                print(f"  ep {self._ep:>5}  steps={ep['l']:>4}  "
-                      f"time={duration:.2f}s", flush=True)
-            return True
-
-    ep_callback = _EpisodeTimingCallback()
-
     print("Starting training...\n")
 
     while model.num_timesteps < total_timesteps:
+        ep_callback = _EpisodeTimingCallback()
         model.learn(
             total_timesteps=steps_per_block,
             reset_num_timesteps=False,
@@ -385,8 +368,7 @@ def evaluate_vs_minimax(
 
     Returns the RL win fraction across all episodes (ties count as 0.5).
     Using both team assignments removes the A/B first-mover bias from
-    the win-rate estimate.  Opponent is a MinimaxAgent (depth 2) —
-    a stronger, less glitchy baseline than the heuristic.
+    the win-rate estimate.  Opponent is a MinimaxAgent (depth 2).
     """
     import multiprocessing as mp
 
@@ -398,31 +380,14 @@ def evaluate_vs_minimax(
     # Alternate rl_is_a flag so exactly half play each side.
     args = [(model_bytes, config, i, i % 2 == 0) for i in range(n_episodes)]
 
-    from tqdm import tqdm
-
-    wins = losses = ties = 0
-    results = []
     with mp.Pool(
         processes=n_workers,
         initializer=_eval_worker_init,
         initargs=(config["network"],),
     ) as pool:
-        with tqdm(total=n_episodes, desc="Eval vs minimax", unit="ep",
-                  bar_format="{l_bar}{bar}| {n}/{total} [{elapsed}<{remaining}] W:{postfix[0]} L:{postfix[1]} T:{postfix[2]}",
-                  postfix=[0, 0, 0], leave=False) as pbar:
-            for result in pool.imap_unordered(_eval_worker_run, args):
-                results.append(result)
-                if result == "win":
-                    wins += 1
-                elif result == "loss":
-                    losses += 1
-                else:
-                    ties += 1
-                pbar.postfix[0] = wins
-                pbar.postfix[1] = losses
-                pbar.postfix[2] = ties
-                pbar.update()
+        results = pool.map(_eval_worker_run, args)
 
+    # results[i] = ("win", "loss", "tie") from the RL agent's perspective
     score = sum(1.0 if r == "win" else 0.5 if r == "tie" else 0.0
                 for r in results)
     return score / n_episodes
@@ -431,8 +396,6 @@ def evaluate_vs_minimax(
 # ── Worker-process state ──────────────────────────────────────────────────────
 
 _worker_rail_network = None
-_worker_model        = None   # cached deserialized model (reused across episodes)
-_worker_model_key    = None   # (len, suffix) fingerprint to detect model changes
 
 
 def _eval_worker_init(net_cfg: dict):
@@ -458,22 +421,13 @@ def _eval_worker_run(args) -> str:
     """Run one eval episode.
     Returns 'win', 'loss', or 'tie' from the RL agent's perspective.
     """
-    global _worker_model, _worker_model_key
     from sb3_contrib import MaskablePPO
     from agents.minimax import MinimaxAgent
 
     model_bytes, config, _seed, rl_is_a = args
-
-    # Cache the deserialized model in the worker process — all episodes in one
-    # eval round use the same weights, so deserializing 11 MB on every episode
-    # is pure waste.  Use (length, last-32-bytes) as a cheap change fingerprint.
-    key = (len(model_bytes), model_bytes[-32:])
-    if _worker_model is None or key != _worker_model_key:
-        _worker_model     = MaskablePPO.load(io.BytesIO(model_bytes))
-        _worker_model_key = key
-
+    model    = MaskablePPO.load(io.BytesIO(model_bytes))
     opponent = MinimaxAgent(config, depth=2, branch_factor=5)
-    return _run_one_episode(_worker_model, opponent, config, _worker_rail_network,
+    return _run_one_episode(model, opponent, config, _worker_rail_network,
                             rl_is_a=rl_is_a)
 
 
