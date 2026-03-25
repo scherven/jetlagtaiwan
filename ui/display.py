@@ -19,7 +19,8 @@ import pygame
 
 from engine.game_state import GameState, Station
 from engine.rail_network import RailNetwork
-from engine.rules import count_controlled_stations
+from engine.rules import compute_route_chip_cost, count_controlled_stations
+from engine.clock import sim_minute_to_wall_clock
 
 # ---------------------------------------------------------------------------
 # Colours
@@ -39,6 +40,16 @@ BTN_TEXT    = (200, 200, 200)
 ROUTE_A     = (*TEAM_A[:3], 180)
 ROUTE_B     = (*TEAM_B[:3], 180)
 
+# Human overlay colours
+OVERLAY_BG       = (20,  20,  30, 200)
+OVERLAY_BORDER_OK  = (80, 200,  80)
+OVERLAY_BORDER_NO  = (200,  80,  80)
+OVERLAY_TEXT     = (240, 240, 240)
+CHIP_BTN_ACTIVE  = (100, 200, 100)
+CHIP_BTN_IDLE    = (50,  55,  70)
+SKIP_BTN_COL     = (160, 120,  40)
+HUMAN_PULSE      = (255, 255, 100)   # bright yellow ring on human's station
+
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
@@ -56,11 +67,19 @@ class Display:
     Call display.handle_events() + display.draw(state, net, log) each frame.
     """
 
-    def __init__(self, config: dict, rail_network: RailNetwork, starting_station_id: str):
+    def __init__(
+        self,
+        config: dict,
+        rail_network: RailNetwork,
+        starting_station_id: str,
+        human_team_id: Optional[str] = None,
+    ):
         self.config = config
         self.net = rail_network
         self.starting_station_id = starting_station_id
         self.speed_options: List[float] = config["simulation"]["speed_options"]
+        self.human_team_id: Optional[str] = human_team_id
+        self._max_chips: int = config["game"].get("max_chips_per_station", 5)
 
         pygame.init()
         info = pygame.display.Info()
@@ -89,7 +108,13 @@ class Display:
         self.is_paused: bool = False
         self.speed_idx: int  = 0   # index into speed_options
         self._buttons: List[dict] = []
+        self._chip_buttons: List[dict] = []
+        self._skip_button: Optional[dict] = None
+        self.extra_chips_selected: int = 0
         self._build_buttons()
+
+        # Human click tracking (set during handle_events, consumed by handle_human_click)
+        self._last_click_pos: Optional[Tuple[int, int]] = None
 
         self._log_surface = pygame.Surface((PANEL_W - 20, LOG_LINES * 16))
 
@@ -143,6 +168,23 @@ class Display:
             {"label": "SPEED -",  "rect": pygame.Rect(bx + bw + 10, by + bh + 8, bw, bh), "action": "speed_down"},
         ]
 
+        if self.human_team_id is not None:
+            # Chip selector: 5 small buttons labelled 0..4
+            cbw = (PANEL_W - 20) // 5 - 2
+            cbh = 26
+            cby = by - 75
+            self._chip_buttons = []
+            for i in range(5):
+                rect = pygame.Rect(bx + i * (cbw + 2), cby, cbw, cbh)
+                self._chip_buttons.append({"label": str(i), "value": i, "rect": rect})
+
+            # Skip button
+            self._skip_button = {
+                "label": "SKIP 30M",
+                "rect": pygame.Rect(bx, cby - cbh - 6, PANEL_W - 20, cbh),
+                "action": "skip",
+            }
+
     # ------------------------------------------------------------------
     # Event handling
     # ------------------------------------------------------------------
@@ -155,7 +197,11 @@ class Display:
           "speed_up"   — increase speed
           "speed_down" — decrease speed
           None         — no relevant event
+
+        Mouse clicks that don't match control buttons are stored in
+        self._last_click_pos for handle_human_click() to process.
         """
+        self._last_click_pos = None
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return "quit"
@@ -167,9 +213,84 @@ class Display:
                 if event.key == pygame.K_DOWN:
                     return "speed_down"
             if event.type == pygame.MOUSEBUTTONDOWN:
+                # Check standard control buttons first
+                hit_control = False
                 for btn in self._buttons:
                     if btn["rect"].collidepoint(event.pos):
+                        hit_control = True
                         return btn["action"]
+                if not hit_control:
+                    # Store click for human input processing
+                    self._last_click_pos = event.pos
+        return None
+
+    def handle_human_click(
+        self,
+        state: GameState,
+        departures,
+        team_id: str,
+    ) -> Optional[dict]:
+        """
+        Inspect the last stored mouse click and resolve it against the human
+        player's available options.
+
+        Returns one of:
+            {"type": "departure", "idx": int, "extra_chips": int}
+            {"type": "challenge"}
+            {"type": "skip"}
+            {"type": "chips", "value": int}
+            None  — click didn't match anything actionable
+        """
+        pos = self._last_click_pos
+        self._last_click_pos = None
+        if pos is None:
+            return None
+
+        # Check skip button
+        if self._skip_button and self._skip_button["rect"].collidepoint(pos):
+            return {"type": "skip"}
+
+        # Check chip selector buttons
+        for cb in self._chip_buttons:
+            if cb["rect"].collidepoint(pos):
+                self.extra_chips_selected = cb["value"]
+                return {"type": "chips", "value": cb["value"]}
+
+        # Check map area
+        if not self.map_rect.collidepoint(pos):
+            return None
+
+        # Check if clicking near a departure destination
+        click_radius = 22
+        challenge_ids = {c.station_id for c in state.challenges}
+        team = state.teams[team_id]
+
+        # Check challenge at current station first (click on own station)
+        own_px = self._station_px.get(team.current_station)
+        if own_px:
+            dist = math.hypot(pos[0] - own_px[0], pos[1] - own_px[1])
+            if dist <= click_radius and team.current_station in challenge_ids:
+                return {"type": "challenge"}
+
+        # Check departure destinations
+        best_idx = None
+        best_dist = float("inf")
+        for i, dep in enumerate(departures):
+            dest_px = self._station_px.get(dep.destination_stop_id)
+            if dest_px is None:
+                continue
+            dist = math.hypot(pos[0] - dest_px[0], pos[1] - dest_px[1])
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+
+        if best_idx is not None and best_dist <= click_radius:
+            return {
+                "type": "departure",
+                "idx": best_idx,
+                "extra_chips": self.extra_chips_selected,
+            }
+
         return None
 
     # ------------------------------------------------------------------
@@ -181,12 +302,20 @@ class Display:
         state: GameState,
         log: List[str],
         starting_station_id: str,
+        human_context=None,
     ) -> None:
+        """
+        human_context: (team_id, departures) tuple when a human player needs
+        to make a decision, or None for AI-only games.
+        """
         self.screen.fill(BG)
         self._draw_edges(state)
         self._draw_stations(state, starting_station_id)
         self._draw_routes(state)
-        self._draw_panel(state, log, starting_station_id)
+        if human_context is not None:
+            team_id, departures = human_context
+            self._draw_human_overlay(state, team_id, departures)
+        self._draw_panel(state, log, starting_station_id, human_context)
         pygame.display.flip()
 
     def _draw_edges(self, state: GameState) -> None:
@@ -316,10 +445,100 @@ class Display:
         self.screen.blit(surf, (0, 0))
 
     # ------------------------------------------------------------------
+    # Human overlay
+    # ------------------------------------------------------------------
+
+    def _draw_human_overlay(
+        self,
+        state: GameState,
+        team_id: str,
+        departures,
+    ) -> None:
+        """
+        Draw departure-destination badges and a highlight ring on the
+        human player's current station.
+        """
+        team = state.teams[team_id]
+        team_colour = TEAM_A if team_id == "A" else TEAM_B
+        challenge_ids = {c.station_id for c in state.challenges}
+        current_wall = sim_minute_to_wall_clock(state.sim_minute)
+
+        surf = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
+
+        # Bright pulsing ring on human's current station
+        own_px = self._station_px.get(team.current_station)
+        if own_px:
+            pygame.draw.circle(surf, (*HUMAN_PULSE, 200), own_px, 20, 4)
+
+        # Challenge label above own station if there's one here
+        if team.current_station in challenge_ids and own_px:
+            chal = next(c for c in state.challenges if c.station_id == team.current_station)
+            val = chal.current_value()
+            ctype = "chip_gain" if chal.type == "chip_gain" else "steal"
+            label = f"CHALLENGE +{val:.0f} ({ctype})"
+            lsurf = self.font_md.render(label, True, CHALLENGE_C)
+            self.screen.blit(lsurf, (own_px[0] - lsurf.get_width() // 2, own_px[1] - 36))
+
+        self.screen.blit(surf, (0, 0))
+
+        # Departure destination badges
+        badge_surf = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
+
+        for i, dep in enumerate(departures):
+            dest_px = self._station_px.get(dep.destination_stop_id)
+            if dest_px is None:
+                continue
+
+            minutes_away = dep.arrival_minutes[-1] - current_wall
+            cost = compute_route_chip_cost(
+                state.stations,
+                dep.intermediate_stops,
+                team_id,
+                self.starting_station_id,
+                extra_chips=self.extra_chips_selected,
+                max_chips_per_station=self._max_chips,
+            )
+            affordable = team.coins <= 0 or cost <= team.coins
+            border = OVERLAY_BORDER_OK if affordable else OVERLAY_BORDER_NO
+
+            dest_station = state.stations.get(dep.destination_stop_id)
+            name = dest_station.name[:14] if dest_station else dep.destination_stop_id[:14]
+            line1 = name
+            line2 = f"~{minutes_away}m  ¢{cost}"
+
+            # Badge dimensions
+            pad = 4
+            w1 = self.font_sm.size(line1)[0]
+            w2 = self.font_sm.size(line2)[0]
+            bw = max(w1, w2) + pad * 2
+            bh = self.font_sm.get_height() * 2 + pad * 3
+            bx = dest_px[0] - bw // 2
+            by = dest_px[1] - bh - 16
+
+            # Background
+            pygame.draw.rect(badge_surf, OVERLAY_BG, (bx, by, bw, bh), border_radius=4)
+            # Border (brighter if has challenge)
+            bcol = (*CHALLENGE_C, 255) if dep.destination_stop_id in challenge_ids else (*border, 200)
+            pygame.draw.rect(badge_surf, bcol, (bx, by, bw, bh), 1, border_radius=4)
+
+            # Text
+            t1 = self.font_sm.render(line1, True, OVERLAY_TEXT)
+            t2 = self.font_sm.render(line2, True, border)
+            badge_surf.blit(t1, (bx + pad, by + pad))
+            badge_surf.blit(t2, (bx + pad, by + pad + self.font_sm.get_height() + 2))
+
+            # Connector line from badge to station
+            pygame.draw.line(badge_surf, (*border, 120),
+                             (dest_px[0], dest_px[1] - 16),
+                             (dest_px[0], by + bh), 1)
+
+        self.screen.blit(badge_surf, (0, 0))
+
+    # ------------------------------------------------------------------
     # Side panel
     # ------------------------------------------------------------------
 
-    def _draw_panel(self, state: GameState, log: List[str], starting_id: str) -> None:
+    def _draw_panel(self, state: GameState, log: List[str], starting_id: str, human_context=None) -> None:
         panel_x = self.W - PANEL_W
         pygame.draw.rect(self.screen, PANEL_BG, (panel_x, 0, PANEL_W, self.H))
 
@@ -382,6 +601,34 @@ class Display:
             text(f"  ... +{len(state.challenges) - 6} more", self.font_sm)
 
         y += 6
+
+        # Human player extras (chip selector + skip)
+        if human_context is not None and self._chip_buttons:
+            human_team_id, departures = human_context
+            h_colour = TEAM_A if human_team_id == "A" else TEAM_B
+            text(f"── YOUR TURN (Team {human_team_id}) ──", self.font_lg, h_colour)
+            text("Extra chips/stop:", self.font_sm)
+            # Render chip buttons inline
+            for cb in self._chip_buttons:
+                active = (cb["value"] == self.extra_chips_selected)
+                col = CHIP_BTN_ACTIVE if active else CHIP_BTN_IDLE
+                pygame.draw.rect(self.screen, col, cb["rect"], border_radius=3)
+                lbl = self.font_sm.render(cb["label"], True, BTN_TEXT)
+                lx = cb["rect"].x + (cb["rect"].width - lbl.get_width()) // 2
+                ly = cb["rect"].y + (cb["rect"].height - lbl.get_height()) // 2
+                self.screen.blit(lbl, (lx, ly))
+            # Skip button
+            if self._skip_button:
+                sb = self._skip_button
+                pygame.draw.rect(self.screen, SKIP_BTN_COL, sb["rect"], border_radius=4)
+                lbl = self.font_sm.render(sb["label"], True, BTN_TEXT)
+                lx = sb["rect"].x + (sb["rect"].width - lbl.get_width()) // 2
+                ly = sb["rect"].y + (sb["rect"].height - lbl.get_height()) // 2
+                self.screen.blit(lbl, (lx, ly))
+            y += 8
+        elif human_context is None and self.human_team_id is not None:
+            # Human is in transit or doing a challenge — just show status
+            text("── Waiting... ──", self.font_lg, (150, 150, 180))
 
         # Speed / controls
         speed = self.speed_options[self.speed_idx]

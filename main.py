@@ -37,6 +37,7 @@ import yaml
 
 from agents.eval import encode_observation, C_MAX_DEFAULT
 from agents.heuristic import HeuristicAgent
+from agents.human import HumanAgent
 from agents.minimax import MinimaxAgent
 from engine.rail_network import RailNetwork
 from engine.simulation import Simulation
@@ -86,10 +87,11 @@ def _make_rl_agent(model_path: str, team_label: str, config: dict):
 def _build_agent(spec: str, label: str, config: dict, starting_station_id: str,
                  minimax_depth: int, minimax_branch: int):
     """
-    Parse an agent spec string and return (agent_fn, display_label).
+    Parse an agent spec string and return (agent_fn, display_label, human_agent_or_none).
 
     Spec formats:
         "heuristic"      — HeuristicAgent
+        "human"          — HumanAgent (interactive Pygame input)
         "minimax"        — MinimaxAgent (uses minimax_depth / minimax_branch)
         "rl:PATH"        — MaskablePPO loaded from PATH
         "PATH"           — treated as rl:PATH for backwards-compat (--model-a)
@@ -99,22 +101,26 @@ def _build_agent(spec: str, label: str, config: dict, starting_station_id: str,
     if spec == "heuristic":
         agent = HeuristicAgent(config)
         agent.starting_station_id = starting_station_id
-        return agent.choose_action, "Heuristic"
+        return agent.choose_action, "Heuristic", None
+
+    if spec == "human":
+        agent = HumanAgent(config)
+        return agent.choose_action, "Human", agent
 
     if spec == "minimax":
         agent = MinimaxAgent(config, depth=minimax_depth, branch_factor=minimax_branch)
         agent.starting_station_id = starting_station_id
-        return agent.choose_action, f"Minimax(depth={minimax_depth})"
+        return agent.choose_action, f"Minimax(depth={minimax_depth})", None
 
     # "rl:PATH" or bare "PATH"
     model_path = spec[3:] if spec.startswith("rl:") else spec
     fn = _make_rl_agent(model_path, label, config)
     if fn is not None:
-        return fn, f"RL({model_path})"
+        return fn, f"RL({model_path})", None
     # Fall back to heuristic if model load failed
     agent = HeuristicAgent(config)
     agent.starting_station_id = starting_station_id
-    return agent.choose_action, "Heuristic(fallback)"
+    return agent.choose_action, "Heuristic(fallback)", None
 
 
 _STARTING_ID = None   # set after network load so the RL closure can reference it
@@ -193,16 +199,20 @@ def main():
     global _STARTING_ID
     _STARTING_ID = starting_station_id
 
-    agent_a, a_label = _build_agent(
+    agent_a, a_label, human_agent_a = _build_agent(
         args.agent_a, "A", config, starting_station_id,
         args.minimax_depth, args.minimax_branch,
     )
-    agent_b, b_label = _build_agent(
+    agent_b, b_label, human_agent_b = _build_agent(
         args.agent_b, "B", config, starting_station_id,
         args.minimax_depth, args.minimax_branch,
     )
     print(f"  Team A: {a_label}")
     print(f"  Team B: {b_label}")
+
+    # Determine which team (if any) is human-controlled
+    human_team_id = "A" if human_agent_a else ("B" if human_agent_b else None)
+    human_agent: HumanAgent = human_agent_a or human_agent_b  # type: ignore
 
     # ------------------------------------------------------------------ #
     # Build simulation
@@ -293,7 +303,7 @@ def main():
     # ------------------------------------------------------------------ #
     # Pygame UI
     # ------------------------------------------------------------------ #
-    display = Display(config, net, starting_station_id)
+    display = Display(config, net, starting_station_id, human_team_id=human_team_id)
 
     # Set starting speed
     speed = args.speed
@@ -307,21 +317,54 @@ def main():
     TARGET_FPS = 60
     sim_minute_accumulator = 0.0   # fractional sim minutes owed
 
+    # Resolve action constants from config (mirrors simulation.py)
+    _k = config["agents"]["max_departures_k"]
+    ACTION_CHALLENGE = _k
+    # ACTION_WAIT = _k + 1  (unused here directly)
+
     running = True
     while running and not sim.done:
         dt_ms = clock.tick(TARGET_FPS)    # milliseconds since last frame
         dt_s  = dt_ms / 1000.0
+
+        # Auto-pause when human player needs to make a decision
+        human_context = None
+        if human_agent and human_agent.needs_input():
+            sim.state.is_paused = True
+            ctx = human_agent.get_context()
+            if ctx is not None:
+                _gs, _tid, _deps = ctx
+                human_context = (_tid, _deps)
 
         # Handle input
         action = display.handle_events()
         if action == "quit":
             running = False
         elif action in ("pause", "play"):
-            sim.state.is_paused = not sim.state.is_paused
+            # Don't let user unpause while human needs input
+            if not (human_agent and human_agent.needs_input()):
+                sim.state.is_paused = not sim.state.is_paused
         elif action == "speed_up":
             display.speed_idx = min(display.speed_idx + 1, len(speed_options) - 1)
         elif action == "speed_down":
             display.speed_idx = max(display.speed_idx - 1, 0)
+
+        # Process human player click (only when awaiting input)
+        if human_agent and human_agent.needs_input() and human_context is not None:
+            _tid, _deps = human_context
+            h_action = display.handle_human_click(sim.state, _deps, _tid)
+            if h_action is not None:
+                htype = h_action["type"]
+                if htype == "departure":
+                    human_agent.queue_action(h_action["idx"], h_action["extra_chips"])
+                    sim.state.is_paused = False
+                elif htype == "challenge":
+                    human_agent.queue_action(ACTION_CHALLENGE)
+                    sim.state.is_paused = False
+                elif htype == "skip":
+                    human_agent.queue_skip(30)
+                    sim.state.is_paused = False
+                # "chips" type just updated display.extra_chips_selected; no sim change needed
 
         # Advance simulation
         if not sim.state.is_paused:
@@ -335,7 +378,7 @@ def main():
                 sim_minute_accumulator -= 1.0
 
         # Render
-        display.draw(sim.state, sim.log[-40:], starting_station_id)
+        display.draw(sim.state, sim.log[-40:], starting_station_id, human_context=human_context)
 
     # Final frame after game ends
     if sim.done:
