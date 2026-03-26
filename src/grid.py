@@ -16,7 +16,8 @@ class GridWorldEnv(gym.Env):
         # Using -1,-1 as "uninitialized" state
         self.agent_location = np.array([0, 0], dtype=np.int32)
         self.challenge_location = np.array([-1, -1], dtype=np.int32)
-        self.agent_coins = 10
+        self.starting_agent_coins = 100
+        self.agent_coins = self.starting_agent_coins
         self.challenge_win = 10
 
         # Define what the agent can observe
@@ -48,7 +49,7 @@ class GridWorldEnv(gym.Env):
         Returns:
             dict: Observation with agent and target positions
         """
-        return {"agent": self.agent_location, "challenge": self.challenge_location, "board": self.grid}
+        return {"agent": self.agent_location, "challenge": self.challenge_location, "board": self.grid, "coins": self.agent_coins}
 
     def get_info(self):
         """Compute auxiliary information for debugging.
@@ -81,6 +82,7 @@ class GridWorldEnv(gym.Env):
 
         self.grid = np.zeros((self.size, self.size))
         self.visit()
+        self.agent_coins = self.starting_agent_coins
 
         observation = self.get_obs()
         info = self.get_info()
@@ -107,13 +109,14 @@ class GridWorldEnv(gym.Env):
         Returns:
             tuple: (observation, reward, terminated, truncated, info)
         """
+        should_terminate = False
         if action == 4 and np.array_equal(self.agent_location, self.challenge_location):
             self.agent_coins += self.challenge_win
             self.randomize_challenge_location()
         elif self.agent_coins > 0:
             self.agent_coins -= 1
         # Map the discrete action (0-3) to a movement direction
-            direction = self._action_to_direction[action]
+            direction = self.action_to_direction[action]
 
         # Update agent position, ensuring it stays within grid bounds
         # np.clip prevents the agent from walking off the edge
@@ -121,13 +124,12 @@ class GridWorldEnv(gym.Env):
                 self.agent_location + direction, 0, self.size - 1
             )
             self.visit()
-            count = self.grid.sum()
-            reward = count // (self.size ** 2)
-            terminated = reward == 1
         else:
-            count = self.grid.sum()
-            reward = count // (self.size ** 2)
-            terminated = True
+            should_terminate = True
+
+        count = self.grid.sum()
+        reward = count / (self.size ** 2)
+        terminated = count == self.size ** 2 or should_terminate
         truncated = False
         # Check if agent reached the target
         # terminated = np.array_equal(self._agent_location, self._target_location)
