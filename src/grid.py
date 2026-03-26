@@ -16,7 +16,7 @@ class GridWorldEnv(gym.Env):
         # Using -1,-1 as "uninitialized" state
         self.agent_location = np.array([0, 0], dtype=np.int32)
         self.challenge_location = np.array([-1, -1], dtype=np.int32)
-        self.starting_agent_coins = 100
+        self.starting_agent_coins = 30
         self.agent_coins = self.starting_agent_coins
         self.challenge_win = 10
 
@@ -40,9 +40,9 @@ class GridWorldEnv(gym.Env):
             1: np.array([-1, 0]),  # Move up (row - 1)
             2: np.array([0, -1]),  # Move left (column - 1)
             3: np.array([1, 0]),   # Move down (row + 1)
-            4: np.array([5, 5]), # do challenge
+            # 4: np.array([5, 5]), # do challenge
         }
-
+        self.steps = 0
     def get_obs(self):
         """Convert internal state to observation format.
 
@@ -86,7 +86,7 @@ class GridWorldEnv(gym.Env):
 
         observation = self.get_obs()
         info = self.get_info()
-
+        self.steps = 0
         return observation, info
     
     def randomize_challenge_location(self):
@@ -109,25 +109,37 @@ class GridWorldEnv(gym.Env):
         Returns:
             tuple: (observation, reward, terminated, truncated, info)
         """
+        prev_location = self.agent_location.copy()
+        prev_count = int(self.grid.sum())
+
         should_terminate = False
-        if action == 4:
-            if np.array_equal(self.agent_location, self.challenge_location):
-                self.agent_coins += self.challenge_win
-                self.randomize_challenge_location()
-        elif self.agent_coins > 0:
-            self.agent_coins -= 1
-            direction = self.action_to_direction[action]
-            self.agent_location = np.clip(
-                self.agent_location + direction, 0, self.size - 1
-            )
-            self.visit()
-        else:
-            should_terminate = True
+        reward = 0
+        # if action == 4:
+        #     ...
+        #     # if np.array_equal(self.agent_location, self.challenge_location):
+        #     #     self.agent_coins += self.challenge_win
+        #     #     self.randomize_challenge_location()
+        #     # else:
+        #     #     reward -= 1
+        # elif self.agent_coins > 0:
+            # self.agent_coins -= 1
+        direction = self.action_to_direction[action]
+        self.agent_location = np.clip(
+            self.agent_location + direction, 0, self.size - 1
+        )
+        self.visit()
+        # else:
+        #     should_terminate = True
 
         count = self.grid.sum()
-        reward = count / (self.size ** 2)
+        delta = int(count) - prev_count
+        reward += delta / (self.size ** 2)
+        # if self.grid[self.agent_location[0], self.agent_location[1]] == 1 and action != 4:
+            # reward -= 0.05
+        # reward += self.agent_coins / 10
         terminated = count == self.size ** 2 or should_terminate
-        truncated = False
+        self.steps += 1
+        truncated = self.steps == 100
         # Check if agent reached the target
         # terminated = np.array_equal(self._agent_location, self._target_location)
 

@@ -9,7 +9,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from grid import GridWorldEnv
 
-N_ACTIONS = 5
+N_ACTIONS = 4
 ALPHA = 0.1
 GAMMA = 0.99
 EPSILON_START = 1.0
@@ -28,10 +28,10 @@ def obs_to_state(obs):
     return (
         int(obs["agent"][0]),
         int(obs["agent"][1]),
-        int(obs["challenge"][0]),
-        int(obs["challenge"][1]),
-        int(obs["board"].sum()),   # integer 1-25, NOT float
-        coins_bucket,
+        # int(obs["challenge"][0]),
+        # int(obs["challenge"][1]),
+        # tuple(obs["board"].flatten())
+        # coins_bucket,
     )
 
 
@@ -63,12 +63,12 @@ def train():
             # Dense reward shaping: small bonus per newly visited cell.
             # Keeps gradients flowing; actual episode reward is still sparse.
             new_coverage = int(obs["board"].sum())
-            shaped_reward = reward #+ (new_coverage - prev_coverage) / (env.size ** 2)
-            prev_coverage = new_coverage
+           # reward# = reward #+ (new_coverage - prev_coverage) / (env.size ** 2)
+            #prev_coverage = new_coverage
 
             next_state = obs_to_state(obs)
             best_next = max(q[(next_state, a)] for a in range(N_ACTIONS))
-            td_target = shaped_reward + GAMMA * best_next * (not done)
+            td_target = reward + GAMMA * best_next * (not done)
             q[(state, action)] += ALPHA * (td_target - q[(state, action)])
 
             state = next_state
