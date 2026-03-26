@@ -46,6 +46,9 @@ class Departure:
     destination_stop_id: str     # canonical station id of final stop on this boarding
     intermediate_stops: List[str]  # ordered canonical station ids after boarding (incl. destination)
     arrival_minutes: List[int]   # arrival minute at each stop in intermediate_stops
+    # Extra coins to spend above the minimum at each stop (parallel to intermediate_stops).
+    # Defaults to all zeros; agents or the human UI may mutate these before the action is submitted.
+    chips_per_stop: List[int] = field(default_factory=list)
 
 
 class RailNetwork:

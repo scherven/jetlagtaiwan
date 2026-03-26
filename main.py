@@ -37,6 +37,7 @@ import yaml
 
 from agents.eval import encode_observation, C_MAX_DEFAULT
 from agents.heuristic import HeuristicAgent
+from agents.human import HumanAgent
 from agents.minimax import MinimaxAgent
 from engine.rail_network import RailNetwork
 from engine.simulation import Simulation
@@ -55,14 +56,14 @@ def _make_rl_agent(model_path: str, team_label: str, config: dict):
         k              = config["agents"]["max_departures_k"]
         c_max          = config["agents"].get("c_max", C_MAX_DEFAULT)
         starting_coins = config["game"]["starting_coins"]
-        max_chips      = config["game"].get("max_chips_per_station", 5)
+        max_chips      = config["game"].get("max_chip_differential", 5)
         print(f"  Loaded RL model for Team {team_label}: {model_path}")
 
         def agent_fn(state, rail_network, team_id, departures):
             obs = encode_observation(
                 state, rail_network, team_id, departures,
                 _STARTING_ID, k=k, starting_coins=starting_coins,
-                max_chips_per_station=max_chips, c_max=c_max,
+                max_chip_differential=max_chips, c_max=c_max,
             )
             mask = np.zeros(k + 2, dtype=bool)
             mask[:min(len(departures), k)] = True
@@ -86,10 +87,11 @@ def _make_rl_agent(model_path: str, team_label: str, config: dict):
 def _build_agent(spec: str, label: str, config: dict, starting_station_id: str,
                  minimax_depth: int, minimax_branch: int):
     """
-    Parse an agent spec string and return (agent_fn, display_label).
+    Parse an agent spec string and return (agent_fn, display_label, human_agent_or_none).
 
     Spec formats:
         "heuristic"      — HeuristicAgent
+        "human"          — HumanAgent (interactive Pygame input)
         "minimax"        — MinimaxAgent (uses minimax_depth / minimax_branch)
         "rl:PATH"        — MaskablePPO loaded from PATH
         "PATH"           — treated as rl:PATH for backwards-compat (--model-a)
@@ -99,22 +101,26 @@ def _build_agent(spec: str, label: str, config: dict, starting_station_id: str,
     if spec == "heuristic":
         agent = HeuristicAgent(config)
         agent.starting_station_id = starting_station_id
-        return agent.choose_action, "Heuristic"
+        return agent.choose_action, "Heuristic", None
+
+    if spec == "human":
+        agent = HumanAgent(config)
+        return agent.choose_action, "Human", agent
 
     if spec == "minimax":
         agent = MinimaxAgent(config, depth=minimax_depth, branch_factor=minimax_branch)
         agent.starting_station_id = starting_station_id
-        return agent.choose_action, f"Minimax(depth={minimax_depth})"
+        return agent.choose_action, f"Minimax(depth={minimax_depth})", None
 
     # "rl:PATH" or bare "PATH"
     model_path = spec[3:] if spec.startswith("rl:") else spec
     fn = _make_rl_agent(model_path, label, config)
     if fn is not None:
-        return fn, f"RL({model_path})"
+        return fn, f"RL({model_path})", None
     # Fall back to heuristic if model load failed
     agent = HeuristicAgent(config)
     agent.starting_station_id = starting_station_id
-    return agent.choose_action, "Heuristic(fallback)"
+    return agent.choose_action, "Heuristic(fallback)", None
 
 
 _STARTING_ID = None   # set after network load so the RL closure can reference it
@@ -129,6 +135,8 @@ def main():
                         help="Team A agent: heuristic | minimax | rl:PATH")
     parser.add_argument("--agent-b", type=str, default="heuristic",
                         help="Team B agent: heuristic | minimax | rl:PATH")
+    parser.add_argument("--days", type=int, default=None,
+                        help="Limit simulation to this many days (overrides config)")
     parser.add_argument("--minimax-depth", type=int, default=2,
                         help="Search depth for minimax agents (default: 2)")
     parser.add_argument("--minimax-branch", type=int, default=5,
@@ -151,6 +159,9 @@ def main():
     # ------------------------------------------------------------------ #
     with open(args.config) as f:
         config = yaml.safe_load(f)
+
+    if args.days is not None:
+        config["game"]["num_days"] = args.days
 
     # ------------------------------------------------------------------ #
     # Build rail network
@@ -188,16 +199,20 @@ def main():
     global _STARTING_ID
     _STARTING_ID = starting_station_id
 
-    agent_a, a_label = _build_agent(
+    agent_a, a_label, human_agent_a = _build_agent(
         args.agent_a, "A", config, starting_station_id,
         args.minimax_depth, args.minimax_branch,
     )
-    agent_b, b_label = _build_agent(
+    agent_b, b_label, human_agent_b = _build_agent(
         args.agent_b, "B", config, starting_station_id,
         args.minimax_depth, args.minimax_branch,
     )
     print(f"  Team A: {a_label}")
     print(f"  Team B: {b_label}")
+
+    # Determine which team (if any) is human-controlled
+    human_team_id = "A" if human_agent_a else ("B" if human_agent_b else None)
+    human_agent: HumanAgent = human_agent_a or human_agent_b  # type: ignore
 
     # ------------------------------------------------------------------ #
     # Build simulation
@@ -208,20 +223,87 @@ def main():
     # Headless mode
     # ------------------------------------------------------------------ #
     if args.headless:
+        from engine.rules import count_controlled_stations
+        from engine.clock import sim_minute_to_str
+
         print("\nRunning headless simulation...")
         t0 = time.time()
+
+        # Per-game stats
+        stats = {
+            "A": {"waits": 0, "boards": 0, "challenges": 0, "cant_afford": 0},
+            "B": {"waits": 0, "boards": 0, "challenges": 0, "cant_afford": 0},
+        }
+
+        MOVE_KEYWORDS = ("boarded", "arrived at", "completed journey",
+                         "started challenge", "cannot afford", "cancelled",
+                         "challenge but")
+
         for events in sim.run():
+            wall = sim_minute_to_str(sim.state.sim_minute)
             for e in events:
                 if e.startswith("==="):
                     print(e)
+                    # Print day snapshot on day boundaries
+                    if "ended" in e or "GAME OVER" in e:
+                        state = sim.state
+                        for tid in ("A", "B"):
+                            t = state.teams[tid]
+                            ctrl = count_controlled_stations(state, tid, starting_station_id)
+                            loc = state.stations[t.current_station].name if t.current_station in state.stations else t.current_station
+                            print(f"  Team {tid}: coins={t.coins:>4d}  controlled={ctrl:>3d}  at={loc!r}")
+                        print(f"  Active challenges: {len(state.challenges)}")
+                elif any(kw in e for kw in MOVE_KEYWORDS):
+                    print(f"  [{wall}] {e}")
+
+                # Tally action events
+                for tid in ("A", "B"):
+                    if f"Team {tid} boarded" in e:
+                        stats[tid]["boards"] += 1
+                    elif f"Team {tid} started challenge" in e:
+                        stats[tid]["challenges"] += 1
+                    elif f"Team {tid} cannot afford" in e:
+                        stats[tid]["cant_afford"] += 1
+
         elapsed = time.time() - t0
+
+        # Final action breakdown
+        print("\n--- Agent Action Summary ---")
+        for tid in ("A", "B"):
+            s = stats[tid]
+            total_active = s["boards"] + s["challenges"] + s["cant_afford"]
+            print(f"  Team {tid} ({a_label if tid == 'A' else b_label}):")
+            print(f"    Boards:      {s['boards']:>4d}")
+            print(f"    Challenges:  {s['challenges']:>4d}")
+            print(f"    Cant afford: {s['cant_afford']:>4d}")
+
+        # Final board state
+        state = sim.state
+        print("\n--- Final Board State ---")
+        for tid in ("A", "B"):
+            ctrl = count_controlled_stations(state, tid, starting_station_id)
+            t = state.teams[tid]
+            print(f"  Team {tid}: coins={t.coins}  controlled_stations={ctrl}")
+        # Top controlled stations per team
+        for tid in ("A", "B"):
+            opp = "B" if tid == "A" else "A"
+            chip_us  = f"chips_team_{tid.lower()}"
+            chip_opp = f"chips_team_{opp.lower()}"
+            contested = [(s.name, getattr(s, chip_us), getattr(s, chip_opp))
+                         for s in state.stations.values()
+                         if s.id != starting_station_id
+                         and getattr(s, chip_us) > 0 and getattr(s, chip_opp) > 0]
+            print(f"  Contested stations for {tid}: {len(contested)}")
+            for name, uc, oc in sorted(contested, key=lambda x: -(x[1]+x[2]))[:5]:
+                print(f"    {name}: us={uc} opp={oc}")
+
         print(f"\nDone in {elapsed:.2f}s")
         return
 
     # ------------------------------------------------------------------ #
     # Pygame UI
     # ------------------------------------------------------------------ #
-    display = Display(config, net, starting_station_id)
+    display = Display(config, net, starting_station_id, human_team_id=human_team_id)
 
     # Set starting speed
     speed = args.speed
@@ -235,21 +317,54 @@ def main():
     TARGET_FPS = 60
     sim_minute_accumulator = 0.0   # fractional sim minutes owed
 
+    # Resolve action constants from config (mirrors simulation.py)
+    _k = config["agents"]["max_departures_k"]
+    ACTION_CHALLENGE = _k
+    # ACTION_WAIT = _k + 1  (unused here directly)
+
     running = True
     while running and not sim.done:
         dt_ms = clock.tick(TARGET_FPS)    # milliseconds since last frame
         dt_s  = dt_ms / 1000.0
+
+        # Auto-pause when human player needs to make a decision
+        human_context = None
+        if human_agent and human_agent.needs_input():
+            sim.state.is_paused = True
+            ctx = human_agent.get_context()
+            if ctx is not None:
+                _gs, _tid, _deps = ctx
+                human_context = (_tid, _deps)
 
         # Handle input
         action = display.handle_events()
         if action == "quit":
             running = False
         elif action in ("pause", "play"):
-            sim.state.is_paused = not sim.state.is_paused
+            # Don't let user unpause while human needs input
+            if not (human_agent and human_agent.needs_input()):
+                sim.state.is_paused = not sim.state.is_paused
         elif action == "speed_up":
             display.speed_idx = min(display.speed_idx + 1, len(speed_options) - 1)
         elif action == "speed_down":
             display.speed_idx = max(display.speed_idx - 1, 0)
+
+        # Process human player click (only when awaiting input)
+        if human_agent and human_agent.needs_input() and human_context is not None:
+            _tid, _deps = human_context
+            h_action = display.handle_human_click(sim.state, _deps, _tid)
+            if h_action is not None:
+                htype = h_action["type"]
+                if htype == "departure":
+                    # chips_per_stop was already written onto the departure object by the UI
+                    human_agent.queue_action(h_action["idx"])
+                    sim.state.is_paused = False
+                elif htype == "challenge":
+                    human_agent.queue_action(ACTION_CHALLENGE)
+                    sim.state.is_paused = False
+                elif htype == "skip":
+                    human_agent.queue_skip(30)
+                    sim.state.is_paused = False
 
         # Advance simulation
         if not sim.state.is_paused:
@@ -263,7 +378,7 @@ def main():
                 sim_minute_accumulator -= 1.0
 
         # Render
-        display.draw(sim.state, sim.log[-40:], starting_station_id)
+        display.draw(sim.state, sim.log[-40:], starting_station_id, human_context=human_context)
 
     # Final frame after game ends
     if sim.done:

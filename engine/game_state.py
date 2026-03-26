@@ -29,7 +29,6 @@ class Team:
     destination_station: Optional[str] = None
     arrival_time: Optional[int] = None   # simulation minute of final destination
     remaining_stops: List[str] = field(default_factory=list)  # ordered upcoming stop IDs on current journey
-    desired_extra_chips: int = 0         # extra chips to place above minimum on neutral/contested stops
 
     def is_in_transit(self) -> bool:
         return self.destination_station is not None

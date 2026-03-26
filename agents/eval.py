@@ -64,7 +64,7 @@ def encode_observation(
     starting_station_id: str,
     k: int = 10,
     starting_coins: int = 50,
-    max_chips_per_station: int = 5,
+    max_chip_differential: int = 5,
     c_max: int = C_MAX_DEFAULT,
 ) -> np.ndarray:
     """Encode the full observation vector for `team_id`."""
@@ -78,7 +78,6 @@ def encode_observation(
     station_list = list(game_state.stations.values())
     N = len(station_list)
 
-    # Lat/lon normalisation bounds
     min_lat, max_lat, min_lon, max_lon = _latlon_bounds(game_state)
 
     def nlat(lat: float) -> float:
@@ -94,12 +93,11 @@ def encode_observation(
             return 0.5, 0.5
         return nlat(s.lat), nlon(s.lon)
 
-    # Max chips across all stations for chip-count normalisation
     max_chips = max(
-        (max(getattr(s, chip_attr_us), getattr(s, chip_attr_opp)) for s in station_list),
-        default=1,
+        max((getattr(s, chip_attr_us) for s in station_list), default=0),
+        max((getattr(s, chip_attr_opp) for s in station_list), default=0),
+        1,
     )
-    max_chips = max(max_chips, 1)
 
     # Challenge value normalisation
     max_chal_val = max((c.current_value() for c in game_state.challenges), default=1.0)
@@ -165,7 +163,7 @@ def encode_observation(
             dep.intermediate_stops,
             team_id,
             starting_station_id,
-            max_chips_per_station=max_chips_per_station,
+            max_chip_differential=max_chip_differential,
         )
         if dest_station:
             uc = getattr(dest_station, chip_attr_us)

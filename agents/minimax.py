@@ -58,7 +58,7 @@ class MinimaxAgent:
         self.k = config["agents"]["max_departures_k"]
         self.depth = depth
         self.branch_factor = branch_factor
-        self.max_chips: int = config["game"].get("max_chips_per_station", 5)
+        self.max_chips: int = config["game"].get("max_chip_differential", 5)
         self.reachability_window: int = config["agents"]["heuristic_reachability_window"]
         self.starting_coins: int = config["game"]["starting_coins"]
         self.starting_station_id: Optional[str] = None
@@ -106,7 +106,7 @@ class MinimaxAgent:
                 dep.intermediate_stops,
                 team_id,
                 self.starting_station_id or "",
-                max_chips_per_station=self.max_chips,
+                max_chip_differential=self.max_chips,
             )
             if team.coins > 0 and cost > team.coins:
                 continue
@@ -188,7 +188,7 @@ class MinimaxAgent:
                 cost = compute_route_chip_cost(
                     state.stations, dep.intermediate_stops, current_team,
                     self.starting_station_id or "",
-                    max_chips_per_station=self.max_chips,
+                    max_chip_differential=self.max_chips,
                 )
                 if state.teams[current_team].coins > 0 and cost > state.teams[current_team].coins:
                     continue
@@ -206,7 +206,7 @@ class MinimaxAgent:
                 cost = compute_route_chip_cost(
                     state.stations, dep.intermediate_stops, current_team,
                     self.starting_station_id or "",
-                    max_chips_per_station=self.max_chips,
+                    max_chip_differential=self.max_chips,
                 )
                 if state.teams[current_team].coins > 0 and cost > state.teams[current_team].coins:
                     continue
@@ -279,7 +279,7 @@ class MinimaxAgent:
                 if ctrl is None:
                     score += 2.0
                 elif ctrl == opp_id:
-                    score += 0.5
+                    score += 1.5
 
             if dep.destination_stop_id in ch_stations:
                 score += 3.0
@@ -322,7 +322,7 @@ class MinimaxAgent:
                 team,
                 sid,
                 extra_chips=0,
-                max_chips_per_station=self.max_chips,
+                max_chip_differential=self.max_chips,
                 game_state=new_state,
             )
             last_valid_stop = stop_id
@@ -373,8 +373,25 @@ class MinimaxAgent:
         list.  The rail network and config are never copied (they are
         read-only for the purposes of lookahead).
         """
-        new_stations = {sid: copy.copy(s) for sid, s in state.stations.items()}
-        new_teams = {tid: copy.copy(t) for tid, t in state.teams.items()}
+        # Directly construct Station/Team objects instead of copy.copy() —
+        # avoids the generic copy machinery (573k copy.copy calls per eval).
+        new_stations = {
+            sid: Station(
+                id=s.id, name=s.name, lat=s.lat, lon=s.lon,
+                chips_team_a=s.chips_team_a, chips_team_b=s.chips_team_b,
+            )
+            for sid, s in state.stations.items()
+        }
+        new_teams = {
+            tid: Team(
+                id=t.id, coins=t.coins,
+                current_station=t.current_station,
+                destination_station=t.destination_station,
+                arrival_time=t.arrival_time,
+                remaining_stops=list(t.remaining_stops),
+            )
+            for tid, t in state.teams.items()
+        }
 
         return GameState(
             day=state.day,

@@ -26,20 +26,21 @@ def compute_route_chip_cost(
     stop_ids: List[str],
     team_id: str,
     starting_station_id: str,
-    extra_chips: int = 0,
-    max_chips_per_station: int = 5,
+    chips_per_stop: Optional[List[int]] = None,
+    max_chip_differential: int = 5,
 ) -> int:
     """
     Compute total chip cost for travelling through stop_ids (in order).
 
-    Per-stop cost:
-      - 0  if we already control the station (our chips > opponent's)
-      - 1  if neutral (tie), plus any extra_chips desired
-      - (opp - our + 1)  if opponent controls, plus extra_chips desired
+    The cap rule: after placing, our chips may not exceed opp_chips + max_chip_differential.
+    So the maximum chips we can place at a stop = max(0, opp_chips + max_chip_differential - our_chips).
 
-    extra_chips: additional chips to place beyond the minimum on neutral /
-                 contested stops (0 = minimum to claim/contest only).
-    max_chips_per_station: hard cap on chips any one team can hold at a stop.
+    Per-stop cost:
+      - 0               if we already control (our > opp) and no extra requested
+      - 1 + extra       if neutral (tie), capped by the differential rule
+      - (opp-our+1)+extra  if opponent controls, capped by the differential rule
+
+    chips_per_stop: extra coins above the minimum at each stop, parallel to stop_ids.
     Starting station is always free.
     """
     total = 0
@@ -47,7 +48,7 @@ def compute_route_chip_cost(
     chip_attr = f"chips_team_{team_id.lower()}"
     opp_attr = f"chips_team_{opponent_id.lower()}"
 
-    for stop_id in stop_ids:
+    for i, stop_id in enumerate(stop_ids):
         if stop_id == starting_station_id:
             continue
         station = stations.get(stop_id)
@@ -55,17 +56,18 @@ def compute_route_chip_cost(
             continue
         our_chips = getattr(station, chip_attr)
         opp_chips = getattr(station, opp_attr)
+        extra = (chips_per_stop[i] if chips_per_stop and i < len(chips_per_stop) else 0)
+
+        # Maximum we are allowed to add (differential cap)
+        cap = max(0, opp_chips + max_chip_differential - our_chips)
 
         if our_chips > opp_chips:
-            # We already control this station: free entry, no chips needed.
-            cost = 0
+            cost = min(extra, cap)
         elif opp_chips > our_chips:
-            # Opponent controls: minimum to take control, plus any extra.
             min_cost = opp_chips - our_chips + 1
-            cost = min(min_cost + extra_chips, max_chips_per_station - our_chips)
+            cost = min(min_cost + extra, cap)
         else:
-            # Neutral (tie): 1 chip to claim, plus any extra.
-            cost = min(1 + extra_chips, max_chips_per_station - our_chips)
+            cost = min(1 + extra, cap)
 
         total += max(0, cost)
     return total
@@ -82,22 +84,21 @@ def place_chips_at_stop(
     own_station_penalty: int = 1,   # kept for signature compat, not currently used
     enemy_station_penalty: int = 3,  # kept for signature compat, not currently used
     extra_chips: int = 0,
-    max_chips_per_station: int = 5,
+    max_chip_differential: int = 5,
     game_state=None,  # GameState | None — pass to keep control cache consistent
 ) -> None:
     """
     Place chips for team at a single stop according to the game rules.
     Modifies station.chips_team_* and team.coins in place.
 
+    Cap rule: after placing, our chips ≤ opp_chips + max_chip_differential.
+    So the most we can ever add = max(0, opp_chips + max_chip_differential - our_chips).
+
     Placement rules:
       - Starting station: always free, skip.
-      - Own station (our > opp): free entry; can optionally add extra_chips
-        for defensive fortification.
+      - Own station (our > opp): free entry; can optionally add extra_chips.
       - Neutral station (tie): 1 chip to claim, plus up to extra_chips more.
-      - Opponent station (opp > our): minimum chips to take control, plus
-        up to extra_chips more.
-      - Hard cap: a team may never hold more than max_chips_per_station at
-        any single stop.
+      - Opponent station (opp > our): minimum to take control, plus up to extra_chips more.
       - Zero-balance: no chips placed (team is broke).
     """
     if station.id == starting_station_id:
@@ -114,18 +115,16 @@ def place_chips_at_stop(
         chips_to_place = 0
     else:
         if opp_chips > our_chips:
-            # Minimum to take control, plus requested extra.
             min_needed = opp_chips - our_chips + 1
             chips_to_place = min_needed + extra_chips
         elif opp_chips == our_chips:
-            # Neutral: 1 to claim, plus requested extra.
             chips_to_place = 1 + extra_chips
         else:
-            # We already control: free entry; only place if extra requested.
             chips_to_place = extra_chips
 
-        # Apply hard cap: can't exceed max_chips_per_station.
-        chips_to_place = max(0, min(chips_to_place, max_chips_per_station - our_chips))
+        # Differential cap: we cannot exceed opp_chips + max_chip_differential.
+        cap = max(0, opp_chips + max_chip_differential - our_chips)
+        chips_to_place = max(0, min(chips_to_place, cap))
         # Can't spend more than we have.
         chips_to_place = min(chips_to_place, team.coins)
         team.coins -= chips_to_place
@@ -207,8 +206,8 @@ def spawn_challenges(
     candidates = [
         sid
         for sid in game_state.stations
-        if sid not in occupied and sid != starting_station_id
-        and (reachable_stations is None or sid in reachable_stations)
+       # if sid != starting_station_id
+       #and   sid not in occupied and (reachable_stations is None or sid in reachable_stations)
     ]
     random.shuffle(candidates)
     spawned = []
@@ -311,13 +310,15 @@ def get_valid_departures(
             if stop == station_id:
                 continue
             if stop not in by_dest:
+                stops_slice = list(dep.intermediate_stops[: j + 1])
                 by_dest[stop] = Departure(
                     trip_id=dep.trip_id,
                     route_id=dep.route_id,
                     departure_minute=dep.departure_minute,
                     destination_stop_id=stop,
-                    intermediate_stops=list(dep.intermediate_stops[: j + 1]),
+                    intermediate_stops=stops_slice,
                     arrival_minutes=[int(a) for a in dep.arrival_minutes[: j + 1]],
+                    chips_per_stop=[0] * len(stops_slice),
                 )
 
     # Sort by arrival time (nearest first), then by departure time
