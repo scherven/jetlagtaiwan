@@ -110,16 +110,13 @@ class GridWorldEnv(gym.Env):
             tuple: (observation, reward, terminated, truncated, info)
         """
         should_terminate = False
-        if action == 4 and np.array_equal(self.agent_location, self.challenge_location):
-            self.agent_coins += self.challenge_win
-            self.randomize_challenge_location()
+        if action == 4:
+            if np.array_equal(self.agent_location, self.challenge_location):
+                self.agent_coins += self.challenge_win
+                self.randomize_challenge_location()
         elif self.agent_coins > 0:
             self.agent_coins -= 1
-        # Map the discrete action (0-3) to a movement direction
             direction = self.action_to_direction[action]
-
-        # Update agent position, ensuring it stays within grid bounds
-        # np.clip prevents the agent from walking off the edge
             self.agent_location = np.clip(
                 self.agent_location + direction, 0, self.size - 1
             )
