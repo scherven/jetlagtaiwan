@@ -33,7 +33,7 @@ class HeuristicAgent:
         self.k = config["agents"]["max_departures_k"]
         self.reachability_window = config["agents"]["heuristic_reachability_window"]
         self.extra_chips: int = config["agents"].get("heuristic_extra_chips", 0)
-        self.max_chips: int = config["game"].get("max_chips_per_station", 5)
+        self.max_chips: int = config["game"].get("max_chip_differential", 5)
         self.challenge_window: int = config["agents"].get("heuristic_challenge_window", 180)
         self.challenge_k: int = config["agents"].get("heuristic_challenge_k", 50)
         self.low_coins_threshold: int = config["agents"].get("heuristic_low_coins_threshold", 15)
@@ -66,9 +66,6 @@ class HeuristicAgent:
         stations = game_state.stations
         starting_id = self.starting_station_id
 
-        # Sync desired_extra_chips onto team so simulation uses the right placement.
-        team.desired_extra_chips = self.extra_chips
-
         if team.is_in_transit():
             return ACTION_WAIT  # already moving, no decision needed
 
@@ -87,13 +84,14 @@ class HeuristicAgent:
         # ----------------------------------------------------------
         scored: List[Tuple[int, Departure, int]] = []  # (idx, dep, cost)
         for idx, dep in enumerate(available_departures[:self.k]):
+            n = len(dep.intermediate_stops)
             cost = compute_route_chip_cost(
                 stations,
                 dep.intermediate_stops,
                 team_id,
                 starting_id or "",
-                extra_chips=self.extra_chips,
-                max_chips_per_station=self.max_chips,
+                chips_per_stop=[self.extra_chips] * n,
+                max_chip_differential=self.max_chips,
             )
             scored.append((idx, dep, cost))
 
@@ -106,8 +104,11 @@ class HeuristicAgent:
             return nb if nb else items
 
         def _take_departure(idx: int) -> int:
-            """Record the departure for anti-bounce and return the action."""
+            """Record departure for anti-bounce, stamp chips_per_stop, return action."""
             self._last_departed_from = team.current_station
+            if 0 <= idx < len(available_departures):
+                dep = available_departures[idx]
+                dep.chips_per_stop = [self.extra_chips] * len(dep.intermediate_stops)
             return idx
 
         # ----------------------------------------------------------
@@ -228,8 +229,8 @@ class HeuristicAgent:
             cost = compute_route_chip_cost(
                 stations, dep.intermediate_stops, team_id,
                 starting_id or "",
-                extra_chips=self.extra_chips,
-                max_chips_per_station=self.max_chips,
+                chips_per_stop=[self.extra_chips] * len(dep.intermediate_stops),
+                max_chip_differential=self.max_chips,
             )
             if not (team.coins >= cost or team.coins <= 0):
                 continue

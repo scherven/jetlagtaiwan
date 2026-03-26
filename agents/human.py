@@ -4,6 +4,11 @@ Human player agent.
 Integrates with the agent callback interface but pauses the simulation
 when a decision is needed so the Pygame UI can collect input.
 
+The Departure objects passed to choose_action have a mutable chips_per_stop
+list (one entry per intermediate stop, all zeros by default).  The UI edits
+those values directly before calling queue_action(), so the simulation
+automatically picks them up when the team boards.
+
 Usage in main.py:
     agent = HumanAgent(config)
     agent_fn = agent.choose_action   # pass as agent callback
@@ -13,8 +18,8 @@ Usage in main.py:
         sim.state.is_paused = True
         ctx = agent.get_context()   # (game_state, team_id, departures)
         # ... render overlay, handle clicks ...
-        # On click:
-        agent.queue_action(dep_idx, extra_chips=2)
+        # On click (after setting departure.chips_per_stop in the UI):
+        agent.queue_action(dep_idx)
         sim.state.is_paused = False
 """
 
@@ -34,7 +39,6 @@ class HumanAgent:
 
         self._pending_context: Optional[Tuple[GameState, str, List[Departure]]] = None
         self._queued_action: Optional[int] = None
-        self._queued_extra_chips: int = 0
         self._skip_remaining: int = 0
 
     # ------------------------------------------------------------------
@@ -53,9 +57,9 @@ class HumanAgent:
             self._skip_remaining -= 1
             return self.ACTION_WAIT
 
-        # Consume a queued action (set by the UI after the player clicks)
+        # Consume a queued action (set by the UI after the player clicks).
+        # chips_per_stop was already written onto the Departure object by the UI.
         if self._queued_action is not None:
-            game_state.teams[team_id].desired_extra_chips = self._queued_extra_chips
             action = self._queued_action
             self._queued_action = None
             self._pending_context = None
@@ -81,10 +85,15 @@ class HumanAgent:
         """Return (game_state, team_id, departures) or None."""
         return self._pending_context
 
-    def queue_action(self, action: int, extra_chips: int = 0) -> None:
-        """Queue a departure / challenge action chosen by the player."""
+    def queue_action(self, action: int) -> None:
+        """
+        Queue a departure / challenge action chosen by the player.
+
+        For departure actions (0 ≤ action < K), the caller must have already
+        written the desired coins into departure.chips_per_stop before calling
+        this method.
+        """
         self._queued_action = action
-        self._queued_extra_chips = extra_chips
         self._pending_context = None
 
     def queue_skip(self, minutes: int = 30) -> None:

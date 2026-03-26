@@ -12,7 +12,7 @@ game:
   num_days: 5
   day_start: "07:30"
   day_end: "17:30"
-  max_chips_per_station: 5
+  max_chip_differential: 5
 
 travel:
   min_chips_per_stop: 1

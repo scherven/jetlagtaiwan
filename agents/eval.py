@@ -64,7 +64,7 @@ def encode_observation(
     starting_station_id: str,
     k: int = 10,
     starting_coins: int = 50,
-    max_chips_per_station: int = 5,
+    max_chip_differential: int = 5,
     c_max: int = C_MAX_DEFAULT,
 ) -> np.ndarray:
     """Encode the full observation vector for `team_id`."""
@@ -163,7 +163,7 @@ def encode_observation(
             dep.intermediate_stops,
             team_id,
             starting_station_id,
-            max_chips_per_station=max_chips_per_station,
+            max_chip_differential=max_chip_differential,
         )
         if dest_station:
             uc = getattr(dest_station, chip_attr_us)

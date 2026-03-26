@@ -56,14 +56,14 @@ def _make_rl_agent(model_path: str, team_label: str, config: dict):
         k              = config["agents"]["max_departures_k"]
         c_max          = config["agents"].get("c_max", C_MAX_DEFAULT)
         starting_coins = config["game"]["starting_coins"]
-        max_chips      = config["game"].get("max_chips_per_station", 5)
+        max_chips      = config["game"].get("max_chip_differential", 5)
         print(f"  Loaded RL model for Team {team_label}: {model_path}")
 
         def agent_fn(state, rail_network, team_id, departures):
             obs = encode_observation(
                 state, rail_network, team_id, departures,
                 _STARTING_ID, k=k, starting_coins=starting_coins,
-                max_chips_per_station=max_chips, c_max=c_max,
+                max_chip_differential=max_chips, c_max=c_max,
             )
             mask = np.zeros(k + 2, dtype=bool)
             mask[:min(len(departures), k)] = True
@@ -356,7 +356,8 @@ def main():
             if h_action is not None:
                 htype = h_action["type"]
                 if htype == "departure":
-                    human_agent.queue_action(h_action["idx"], h_action["extra_chips"])
+                    # chips_per_stop was already written onto the departure object by the UI
+                    human_agent.queue_action(h_action["idx"])
                     sim.state.is_paused = False
                 elif htype == "challenge":
                     human_agent.queue_action(ACTION_CHALLENGE)
@@ -364,7 +365,6 @@ def main():
                 elif htype == "skip":
                     human_agent.queue_skip(30)
                     sim.state.is_paused = False
-                # "chips" type just updated display.extra_chips_selected; no sim change needed
 
         # Advance simulation
         if not sim.state.is_paused:

@@ -58,7 +58,7 @@ class MinimaxAgent:
         self.k = config["agents"]["max_departures_k"]
         self.depth = depth
         self.branch_factor = branch_factor
-        self.max_chips: int = config["game"].get("max_chips_per_station", 5)
+        self.max_chips: int = config["game"].get("max_chip_differential", 5)
         self.reachability_window: int = config["agents"]["heuristic_reachability_window"]
         self.starting_coins: int = config["game"]["starting_coins"]
         self.starting_station_id: Optional[str] = None
@@ -106,7 +106,7 @@ class MinimaxAgent:
                 dep.intermediate_stops,
                 team_id,
                 self.starting_station_id or "",
-                max_chips_per_station=self.max_chips,
+                max_chip_differential=self.max_chips,
             )
             if team.coins > 0 and cost > team.coins:
                 continue
@@ -188,7 +188,7 @@ class MinimaxAgent:
                 cost = compute_route_chip_cost(
                     state.stations, dep.intermediate_stops, current_team,
                     self.starting_station_id or "",
-                    max_chips_per_station=self.max_chips,
+                    max_chip_differential=self.max_chips,
                 )
                 if state.teams[current_team].coins > 0 and cost > state.teams[current_team].coins:
                     continue
@@ -206,7 +206,7 @@ class MinimaxAgent:
                 cost = compute_route_chip_cost(
                     state.stations, dep.intermediate_stops, current_team,
                     self.starting_station_id or "",
-                    max_chips_per_station=self.max_chips,
+                    max_chip_differential=self.max_chips,
                 )
                 if state.teams[current_team].coins > 0 and cost > state.teams[current_team].coins:
                     continue
@@ -322,7 +322,7 @@ class MinimaxAgent:
                 team,
                 sid,
                 extra_chips=0,
-                max_chips_per_station=self.max_chips,
+                max_chip_differential=self.max_chips,
                 game_state=new_state,
             )
             last_valid_stop = stop_id
@@ -389,7 +389,6 @@ class MinimaxAgent:
                 destination_station=t.destination_station,
                 arrival_time=t.arrival_time,
                 remaining_stops=list(t.remaining_stops),
-                desired_extra_chips=t.desired_extra_chips,
             )
             for tid, t in state.teams.items()
         }

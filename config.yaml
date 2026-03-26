@@ -15,7 +15,7 @@ game:
   num_days: 5
   day_start: "07:30"
   day_end: "17:30"
-  max_chips_per_station: 5 # hard cap: one team can hold at most this many chips at any stop
+  max_chip_differential: 5 # max lead one team can hold over the other at any station (max chips = opp_chips + 5)
 
 travel:
   min_chips_per_stop: 1
@@ -24,7 +24,7 @@ travel:
 
 challenges:
   initial_count: 3
-  spawn_threshold: 10 # if board has fewer than this, spawn 2 on completion; else spawn 1
+  spawn_threshold: 9 # if board has fewer than this, spawn 2 on completion; else spawn 1
   chip_gain_base: 50
   steal_fraction: 0.20 # 20% of opponent balance
   steal_probability: 0.25 # probability a new challenge is a steal (vs chip_gain)

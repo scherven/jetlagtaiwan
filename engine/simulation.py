@@ -46,6 +46,7 @@ class _TransitEntry:
     trip_id: str
     stops: List[str]            # canonical station IDs remaining (incl. destination)
     wall_minutes: List[int]     # wall-clock arrival minute at each stop
+    chips_per_stop: List[int]   # extra coins to spend above minimum at each stop
 
 
 @dataclass
@@ -245,6 +246,7 @@ class Simulation:
         while entry.stops and entry.wall_minutes[0] <= current_wall:
             stop_id = entry.stops.pop(0)
             arr_min = entry.wall_minutes.pop(0)
+            extra = entry.chips_per_stop.pop(0) if entry.chips_per_stop else 0
 
             # Skip if past day end (cancelled journey)
             if arr_min > DAY_END_MINUTE:
@@ -258,8 +260,8 @@ class Simulation:
                 station, team, self._starting_station_id,
                 own_station_penalty=tcfg["own_station_penalty"],
                 enemy_station_penalty=tcfg["enemy_station_penalty"],
-                extra_chips=team.desired_extra_chips,
-                max_chips_per_station=self.config["game"].get("max_chips_per_station", 5),
+                extra_chips=extra,
+                max_chip_differential=self.config["game"].get("max_chip_differential", 5),
                 game_state=self.state,
             )
 
@@ -404,11 +406,16 @@ class Simulation:
         if not valid_stops:
             return []
 
+        # Build chips_per_stop aligned with valid_stops
+        valid_chips = list(departure.chips_per_stop[:len(valid_stops)])
+        if len(valid_chips) < len(valid_stops):
+            valid_chips += [0] * (len(valid_stops) - len(valid_chips))
+
         # Check affordability (team may board if balance is negative already)
         cost = compute_route_chip_cost(
             self.state.stations, valid_stops, team_id, self._starting_station_id,
-            extra_chips=team.desired_extra_chips,
-            max_chips_per_station=self.config["game"].get("max_chips_per_station", 5),
+            chips_per_stop=valid_chips,
+            max_chip_differential=self.config["game"].get("max_chip_differential", 5),
         )
         if team.coins > 0 and cost > team.coins:
             return [f"Team {team_id} cannot afford train to {self.state.stations.get(valid_stops[-1], type('', (), {'name': valid_stops[-1]})()).name!r} (cost={cost}, coins={team.coins})."]
@@ -426,6 +433,7 @@ class Simulation:
             trip_id=departure.trip_id,
             stops=list(valid_stops),
             wall_minutes=list(valid_arr),
+            chips_per_stop=list(valid_chips),
         )
 
         return [
